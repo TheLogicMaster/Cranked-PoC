@@ -1,0 +1,5 @@
+# Keep every text file with LF endings on every platform (the scripts run in bash, and the patches must apply to a
+# checkout with LF endings); the patches and binary files are never converted.
+* text=auto eol=lf
+*.patch -text
+*.png binary

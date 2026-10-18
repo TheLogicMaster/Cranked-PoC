@@ -1,0 +1,198 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index afdb1c3..a6551f3 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -7,6 +7,14 @@ project(cranked)
+ set(CMAKE_CXX_STANDARD 20)
+ set(CMAKE_CXX_STANDARD_REQUIRED ON)
+ set(CMAKE_CXX_EXTENSIONS OFF)
++# the libretro core and the Java binding are shared libraries, so every static library linked into them must be
++# position independent (otherwise the bundled asio fails to link: "relocation R_X86_64_TPOFF32 ... can not be used
++# when making a shared object")
++set(CMAKE_POSITION_INDEPENDENT_CODE ON)
++# the bundled libraries are linked in statically, so the programs run without the build folder's shared libraries
++# (libzip's own option would otherwise make every library shared, and under MSVC Capstone's static and shared
++# libraries would both be capstone.lib)
++option(BUILD_SHARED_LIBS "Build the bundled libraries as shared libraries" OFF)
+ 
+ add_subdirectory(core)
+ 
+@@ -25,3 +33,7 @@ endif ()
+ if (NOT SKIP_LIBRETRO)
+     add_subdirectory(libretro)
+ endif ()
++add_subdirectory(runner)
++if (EMSCRIPTEN) # browser front end
++    add_subdirectory(web)
++endif ()
+diff --git a/runner/CMakeLists.txt b/runner/CMakeLists.txt
+new file mode 100644
+index 0000000..8a439e8
+--- /dev/null
++++ b/runner/CMakeLists.txt
+@@ -0,0 +1,7 @@
++add_executable(cranked_runner runner.cpp)
++target_link_libraries(cranked_runner cranked)
++if (EMSCRIPTEN) # run under Node with direct file access and the real environment
++    target_link_options(cranked_runner PRIVATE "--pre-js=${CMAKE_CURRENT_SOURCE_DIR}/node_env.js" -sNODERAWFS=1
++            -sALLOW_MEMORY_GROWTH=1 -sSTACK_SIZE=4194304 -sEXIT_RUNTIME=1
++            "-sEXPORTED_RUNTIME_METHODS=['stackSave','stackRestore','stackAlloc']")
++endif ()
+diff --git a/runner/node_env.js b/runner/node_env.js
+new file mode 100644
+index 0000000..59673bb
+--- /dev/null
++++ b/runner/node_env.js
+@@ -0,0 +1,3 @@
++// WebAssembly runner under Node: pass the real environment through (Emscripten's default is a fixed set)
++Module['preRun'] = Module['preRun'] || [];
++Module['preRun'].push(function () { if (typeof process !== 'undefined') Object.assign(ENV, process.env); });
+diff --git a/runner/runner.cpp b/runner/runner.cpp
+new file mode 100644
+index 0000000..a4952ae
+--- /dev/null
++++ b/runner/runner.cpp
+@@ -0,0 +1,120 @@
++#include <map>
++// Headless test runner: load a .pdx and run it until it stops or a time budget ends.
++#include "Cranked.hpp"
++#include <chrono>
++#include <cstdio>
++#include <cstdlib>
++#include <thread>
++#include <atomic>
++#include <fstream>
++#include <vector>
++using namespace cranked;
++static long long frameCount = 0; static double updateNanos = 0;
++static unsigned long long insnFrames = 0, insnTotal = 0, insnMax = 0; // CRANKED_COUNT_INSNS
++
++int main(int argc, char **argv) {
++    if (argc < 2) { std::fprintf(stderr, "usage: runner <game.pdx> [seconds]\n"); return 2; }
++    double seconds = argc > 2 ? std::atof(argv[2]) : 2.0;
++    auto *c = new Cranked;
++    try {
++        // the watchdog also covers the main chunk, which runs inside start(): a game whose main.lua never
++        // returns is interrupted 5 seconds after the budget, as an update that never returns is
++        // The deadline moves to the end of the frame loop's budget once loading is done.
++        static std::atomic<bool> finished{ false };
++        static std::atomic<long long> deadline{ 0 };
++        auto steadyMs = [] { return (long long) std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); };
++        deadline = steadyMs() + (long long) (seconds * 1000);
++#ifndef __EMSCRIPTEN__ // no threads in the WebAssembly build: the run has no real-time watchdog there
++        std::thread([c, steadyMs] {
++            while (!finished and steadyMs() < deadline.load() + 5000)
++                std::this_thread::sleep_for(std::chrono::milliseconds(50));
++            if (!finished) c->luaInterrupt = true;
++        }).detach();
++#endif
++        // RUNNER_VIRTUAL_CLOCK=1: the game's clock advances 1 ms per loop iteration, without sleeping, and the
++        // budget is in game time; runs are then the same whatever the host's load (the watchdogs stay on real time)
++        static const bool virtualClock = getenv("RUNNER_VIRTUAL_CLOCK") != nullptr;
++        if (virtualClock) c->useVirtualClock();
++        c->load(argv[1]);
++        c->start();
++        // Optional input timeline: lines of "<ms> <buttonBits> <crankAngle> <docked>"
++        struct Ev { int ms, buttons; float angle; int docked; };
++        std::vector<Ev> evs;
++        if (argc > 3) { std::ifstream in(argv[3]); Ev e; while (in >> e.ms >> e.buttons >> e.angle >> e.docked) evs.push_back(e); }
++        size_t next = 0;
++        auto begin = std::chrono::steady_clock::now();
++        auto end = begin + std::chrono::milliseconds((int)(seconds * 1000));
++        deadline = steadyMs() + (long long) (seconds * 1000);
++        // watchdog: game Lua that never returns from an update is interrupted 5 seconds after the budget
++        // (the thread above, with its deadline now set from here)
++        auto gameBegin = c->steadyNow();
++        while (c->state == Cranked::State::Running && (virtualClock ? c->steadyNow() - gameBegin < std::chrono::milliseconds((int)(seconds * 1000)) : std::chrono::steady_clock::now() < end)) {
++            if (virtualClock) {
++                c->advanceVirtualClock(1000);
++                deadline = steadyMs() + 30000; // the real-time watchdog only catches a frame that never returns
++            }
++            int now = virtualClock ? (int)std::chrono::duration_cast<std::chrono::milliseconds>(c->steadyNow() - gameBegin).count()
++                                   : (int)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - begin).count();
++            while (next < evs.size() && evs[next].ms <= now) { c->currentInputs = evs[next].buttons; c->crankAngle = evs[next].angle; c->crankDocked = evs[next].docked; next++; }
++            { // RUNNER_PROFILE=1: host time spent in update (game code, rendering, audio), per displayed frame
++                static auto lastFrame0 = c->lastFrameTime;
++                auto t0 = std::chrono::steady_clock::now();
++                c->update();
++                updateNanos += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
++                if (c->lastFrameTime != lastFrame0) { lastFrame0 = c->lastFrameTime; frameCount++;
++                    // CRANKED_COUNT_INSNS=1: ARM instructions between displayed frames (the largest after the
++                    // first 30 frames, which include loading)
++                    static uint64_t lastCount = 0; uint64_t n = c->nativeEngine.insnCount - lastCount; lastCount += n;
++                    if (frameCount > 30) { insnFrames++; insnTotal += n; insnMax = std::max(insnMax, (unsigned long long) n); } }
++            }
++            static const bool heapDebug = getenv("CRANKED_HEAP_DEBUG") != nullptr; // read once (getenv per frame is costly)
++            if (heapDebug) { static int lastReport = -1000; if (now - lastReport >= 500) { lastReport = now; std::fprintf(stderr, "heap used at %d ms: %zu KB\n", now, c->heap.usedBytes / 1024);
++                std::map<int, int> counts; for (auto r : c->nativeEngine.liveResources()) counts[(int) r->type]++;
++                std::fprintf(stderr, "resources at %d ms:", now); for (auto &[t, n] : counts) std::fprintf(stderr, " %d=%d", t, n); std::fprintf(stderr, "\n"); } }
++            { // produce audio in lockstep with game frames: 44,100 / framerate samples per frame, so
++              // measurements are deterministic and slow emulated effects cannot fall behind
++                static auto lastFrame = c->lastFrameTime;
++                static double carry = 0;
++                // RUNNER_NO_AUDIO: mix nothing, as the Simulator does without an audio device (its audio clock then stays
++                // at 0)
++                static bool noAudio = getenv("RUNNER_NO_AUDIO") != nullptr;
++                if (!noAudio and c->lastFrameTime != lastFrame) {
++                    lastFrame = c->lastFrameTime;
++                    double rate = c->graphics.framerate > 0 ? c->graphics.framerate : 30.0;
++                    carry += 44100.0 / rate;
++                    int n = (int) carry; carry -= n;
++                    std::vector<int16_t> buf(n * 2);
++                    static int audioFrames = 0;
++                    if (getenv("RUNNER_AUDIO_DEBUG")) std::fprintf(stderr, "audio frame %d at %d ms: %d samples\n", audioFrames, now, n);
++                    c->audio.sampleAudio(buf.data(), n);
++                    audioFrames++;
++                    // RUNNER_AUDIO_OUT=<file>: append the final output (16-bit stereo, interleaved), to compare with the
++                    // Simulator's SDL disk driver file
++                    static FILE *audioOut = getenv("RUNNER_AUDIO_OUT") ? std::fopen(getenv("RUNNER_AUDIO_OUT"), "wb") : nullptr;
++                    if (audioOut) { std::fwrite(buf.data(), 2, buf.size(), audioOut); std::fflush(audioOut); }
++                }
++            }
++            if (!virtualClock) std::this_thread::sleep_for(std::chrono::milliseconds(1));
++        }
++    } catch (std::exception &e) {
++        std::fprintf(stderr, "runner exception: %s\n", e.what());
++        if (auto native = dynamic_cast<cranked::NativeEngine::NativeExecutionError *>(&e); native and std::getenv("RUNNER_CORE")) std::fprintf(stderr, "%s\n", native->getDump().c_str()); // RUNNER_CORE=1 prints the registers
++        return 1;
++    }
++    if (auto path = std::getenv("RUNNER_FRAME_OUT")) { // the last displayed frame as a PGM image
++        if (FILE *f = std::fopen(path, "wb")) {
++            std::fprintf(f, "P5 400 240 255\n");
++            for (auto &row : c->graphics.displayBufferRGBA) for (auto px : row) std::fputc((int) (px & 0xFF), f);
++            std::fclose(f);
++        }
++    }
++    if (std::getenv("RUNNER_PROFILE"))
++        std::fprintf(stderr, "profile: frames=%lld update_ms=%.1f per_frame_ms=%.3f\n", (long long) frameCount, updateNanos / 1e6,
++                     frameCount ? updateNanos / 1e6 / (double) frameCount : 0.0);
++    if (std::getenv("CRANKED_COUNT_INSNS"))
++        std::fprintf(stderr, "insns: total=%llu frames=%llu mean_per_frame=%.0f max_per_frame=%llu\n", (unsigned long long) c->nativeEngine.insnCount,
++                     (unsigned long long) insnFrames, insnFrames ? (double) insnTotal / insnFrames : 0.0, (unsigned long long) insnMax);
++    std::fprintf(stderr, "runner done, state=%d\n", (int)c->state);
++    std::fflush(stdout); // _Exit skips stdio's flush, which would lose buffered print output
++    std::_Exit(0);
++}
+diff --git a/scripts/process_headers.py b/scripts/process_headers.py
+index 3274116..3101094 100644
+--- a/scripts/process_headers.py
++++ b/scripts/process_headers.py
+@@ -335,6 +335,18 @@ def main():
+     for custom_api_struct in CUSTOM_API_STRUCTS:
+         collect_api_structs(find_struct(custom_api_struct), None, '')
+ 
++    # Opaque values: userdata and context pointers are stored and handed back by the API, never dereferenced, so they
++    # are passed as raw 32-bit values instead of being translated as addresses. A game may pass any value, such as
++    # (void *) 1, and translation can only work for addresses inside emulated memory.
++    OPAQUE_PARAM_NAMES = {'userdata', 'ud', 'buttonud', 'context'}
++    opaque = CType('cref_t', emu_type='uint32_t', wrapper_type='cref_t')
++    for func in functions:
++        for param in func.params:
++            if isinstance(param, CField) and param.field_name in OPAQUE_PARAM_NAMES and param.c_type.wrapper_type == 'void *':
++                param.c_type = opaque
++        if func.qualified_name.endswith('Userdata') and func.qualified_name.split('_')[-1].startswith('get') and func.return_type.wrapper_type == 'void *':
++            func.return_type = opaque
++
+     with open(os.path.join(gen_path, 'PlaydateAPI.hpp'), 'w') as f:
+         f.write('// Auto-generated Playdate compatible struct definitions (32-bit word size)\n\n')
+ 

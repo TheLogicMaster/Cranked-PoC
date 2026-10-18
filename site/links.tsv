@@ -1,0 +1,16 @@
+# Games the site links to instead of hosting: their licenses do not clearly allow redistribution (usually code-only
+# licenses, or art and sound with no terms), so the catalog sends players to the author's page. A "download" (or -) is
+# a direct address, played through the optional download proxy (packaging/download-proxy); give one only when the
+# game may be redistributed (the proxy passes on a copy). Columns, tab separated:
+# version	title	author	license	source	page	download	description
+2020	BrickCrusher 2020	aliasaria	Not stated	https://github.com/aliasaria/BrickCrusher2020	https://aliasaria.itch.io/brickcrusher-2020-for-playdate	-	A brick breaker (free on itch.io)
+1.1	UPWARD	DanB91	GPL-3.0 (code); a port of Matthias Falk's PICO-8 game	https://github.com/DanB91/UPWARD-for-Playdate	https://danb91.itch.io/upward-for-playdate	-	A short, hard 1-bit puzzle platformer (free on itch.io)
+2	Simple Snake	Mocchi Mochi	MIT; the music's source is not stated	https://github.com/Mocchi-Mochi/playdate-snake-game	https://tauchme.itch.io/simple-snake-playdate	-	Snake (free on itch.io)
+2	Rachel's Game Pack	Moosadee	Not stated	https://gitlab.com/moosadee/moosadee-playdate-games	https://moosadee.itch.io/rachels-playdate-game-pack	-	Small games in one pack (pay what you want on itch.io)
+1.2	Waternet	Willems Davy (joyrider3774)	MIT; two skins are based on others' work	https://github.com/joyrider3774/waternet_playdate	https://github.com/joyrider3774/waternet_playdate/releases	-	Connect the water pipes (C)
+1.1	Checkers	Willems Davy (joyrider3774)	MIT; Kenney sounds CC0; the music sequence's terms are not stated	https://github.com/joyrider3774/checkers_playdate	https://github.com/joyrider3774/checkers_playdate/releases	-	Checkers (C++)
+1.1	Worm	Willems Davy (joyrider3774)	MIT (the code)	https://github.com/joyrider3774/worm_playdate	https://github.com/joyrider3774/worm_playdate/releases	-	Steer the worm through the level with the buttons, in five modes (C)
+1.0	Znax	Willems Davy (joyrider3774)	MIT (the code)	https://github.com/joyrider3774/znax_playdate	https://github.com/joyrider3774/znax_playdate/releases	-	Pick four same-coloured blocks at the corners of a rectangle to clear it, against the clock (C)
+0.9.1-beta	PlayPong	Cesar Rincon	MIT; free assets by others, terms not stated	https://github.com/knightfox75/PlayPong	https://github.com/knightfox75/PlayPong/releases	-	Pong (C)
+2024	Crank The World	Aras Pranckevicius	Unlicense (the code); music terms not stated	https://github.com/aras-p/demo-pd-cranktheworld	https://github.com/aras-p/demo-pd-cranktheworld	-	A demoscene demo (C)
+-	Factory Farming tech demo	Tim Martin	MIT (code); art, music and fonts under their own licenses	https://github.com/timboe/FactoryFarming	https://timboe.itch.io/factory-farming	-	A factory and farming builder; the free tech demo (C)

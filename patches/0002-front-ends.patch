@@ -1,0 +1,2001 @@
+diff --git a/desktop/CMakeLists.txt b/desktop/CMakeLists.txt
+index 31cc9ce..f6e4e0d 100644
+--- a/desktop/CMakeLists.txt
++++ b/desktop/CMakeLists.txt
+@@ -10,6 +10,11 @@ find_package(SDL2 QUIET)
+ find_package(cxxopts QUIET)
+ 
+ if (NOT TARGET SDL2::SDL2)
++    # the bundled SDL is linked in statically, so the executable runs on its own (and a game can be wrapped
++    # into it as one file)
++    set(SDL_SHARED OFF CACHE BOOL "" FORCE)
++    set(SDL_STATIC ON CACHE BOOL "" FORCE)
++    set(SDL_TEST OFF CACHE BOOL "" FORCE)
+     add_subdirectory(libs/SDL)
+ endif ()
+ 
+@@ -36,17 +41,24 @@ target_include_directories(cranked_desktop PUBLIC
+         libs/imgui_club/imgui_memory_editor
+         libs/ImGuiFileDialog/
+ )
+-target_link_libraries(cranked_desktop cranked cxxopts::cxxopts SDL2::SDL2)
++if (TARGET SDL2::SDL2)
++    target_link_libraries(cranked_desktop cranked cxxopts::cxxopts SDL2::SDL2)
++else () # the static library (see above)
++    target_link_libraries(cranked_desktop cranked cxxopts::cxxopts SDL2::SDL2-static)
++endif ()
++# SDL_MAIN_HANDLED is defined for the whole project (core/CMakeLists.txt), so main() stays the entry point and the
++# executable is a console program on Windows (SDL2main's WinMain would look for SDL_main)
+ 
+ set_target_properties(cranked_desktop PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
+ 
+ if (WIN32)
+     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /MP /Zc:__cplusplus")
+ 
+-    file(GLOB DLL_FILES "${CMAKE_BINARY_DIR}/*.dll")
+-
++    # the DLLs the executable links (capstone, for example) go next to it; the executable itself is in the list so
++    # the copy has a file even when there are no DLLs (a configure-time glob would run before anything is built)
+     add_custom_command(
+-            TARGET cranked_desktop TARGET POST_BUILD
+-            COMMAND ${CMAKE_COMMAND} -E copy ${DLL_FILES} $<TARGET_FILE_DIR:cranked_desktop>
++            TARGET cranked_desktop POST_BUILD
++            COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_RUNTIME_DLLS:cranked_desktop> $<TARGET_FILE:cranked_desktop> $<TARGET_FILE_DIR:cranked_desktop>
++            COMMAND_EXPAND_LISTS
+     )
+ endif ()
+diff --git a/desktop/main.cpp b/desktop/main.cpp
+index 623038a..1db80e8 100644
+--- a/desktop/main.cpp
++++ b/desktop/main.cpp
+@@ -11,6 +11,8 @@
+ 
+ #include <SDL.h>
+ 
++#include <fstream>
++
+ #include "magic_enum/magic_enum_all.hpp"
+ 
+ #if !SDL_VERSION_ATLEAST(2,0,17)
+@@ -31,6 +33,8 @@ struct Userdata {
+     map<string, setting_type> settings; // Only updated while saving/loading
+     float scale = 1;
+     magic_enum::containers::array<Windows, bool> windowStates{};
++    bool playerView = true; // the game fills the window (the debug windows stay available from View)
++    vector<string> recentGames; // newest first
+ 
+     template<typename T>
+     bool tryGetSetting(const string &name, T &out) {
+@@ -42,25 +46,155 @@ struct Userdata {
+     }
+ };
+ 
++// Proof of Concept player features: a game can travel inside the executable (appended to it) or next to it
++// (game.pdx or game.zip in the executable's folder, or in Contents/Resources of a macOS app). An appended game is:
++// the zip's bytes, then its length as 8 little-endian bytes, then "CRNKGAME".
++namespace {
++constexpr char EMBED_MAGIC[8] = { 'C', 'R', 'N', 'K', 'G', 'A', 'M', 'E' };
++constexpr int MAX_RECENT = 8;
++
++string sdlPath(char *path) { // takes an SDL path string, and frees it
++    string result = path ? path : "";
++    SDL_free(path);
++    return result;
++}
++
++// The executable's own file, from argv[0] (as given, or its name in SDL's base folder): no platform calls needed
++vector<fs::path> selfCandidates(const char *argv0) {
++    vector<fs::path> paths;
++    if (!argv0 or !*argv0)
++        return paths;
++    fs::path given = argv0;
++    paths.push_back(given);
++    auto base = sdlPath(SDL_GetBasePath());
++    if (!base.empty()) {
++        paths.push_back(fs::path(base) / given.filename());
++        paths.push_back(fs::path(base) / (given.filename().string() + ".exe"));
++    }
++    return paths;
++}
++
++// Copies an appended game out of the executable into the data folder (once per distinct game); the path, or empty
++string extractEmbeddedGame(const char *argv0, const fs::path &folder) {
++    for (auto &candidate : selfCandidates(argv0)) {
++        std::ifstream in(candidate, std::ios::binary);
++        if (!in)
++            continue;
++        in.seekg(0, std::ios::end);
++        auto fileSize = (int64) in.tellg();
++        if (fileSize < 16)
++            continue;
++        char trailer[16];
++        in.seekg(fileSize - 16);
++        if (!in.read(trailer, 16) or memcmp(trailer + 8, EMBED_MAGIC, 8) != 0)
++            continue;
++        uint64 size = 0;
++        for (int i = 7; i >= 0; i--)
++            size = size << 8 | (uint8) trailer[i];
++        if (size == 0 or size > (uint64) fileSize - 16)
++            continue;
++        vector<char> data(size);
++        in.seekg(fileSize - 16 - (int64) size);
++        if (!in.read(data.data(), (std::streamsize) size))
++            continue;
++        uint64 hash = 1469598103934665603ull; // FNV-1a: one copy per distinct game
++        for (char c : data)
++            hash = (hash ^ (uint8) c) * 1099511628211ull;
++        fs::create_directories(folder);
++        char name[40];
++        snprintf(name, sizeof(name), "embedded-%016llx.zip", (unsigned long long) hash);
++        auto out = folder / name;
++        std::error_code ec;
++        if (!fs::exists(out, ec) or fs::file_size(out, ec) != size) {
++            std::ofstream file(out, std::ios::binary | std::ios::trunc);
++            file.write(data.data(), (std::streamsize) size);
++            if (!file)
++                throw CrankedError("Could not write the game to {}", out.string());
++        }
++        return out.string();
++    }
++    return "";
++}
++
++// A game shipped beside the executable, or empty
++string bundledGame() {
++    auto base = sdlPath(SDL_GetBasePath());
++    if (base.empty())
++        return "";
++    std::error_code ec;
++    for (auto name : { "game.pdx", "game.zip" })
++        if (fs::exists(fs::path(base) / name, ec))
++            return (fs::path(base) / name).string();
++    return "";
++}
++
++void addRecent(vector<string> &recent, const string &path) {
++    std::erase(recent, path);
++    recent.insert(recent.begin(), path);
++    if (recent.size() > MAX_RECENT)
++        recent.resize(MAX_RECENT);
++}
++}
++
+ int main(int argc, const char *args[]) {
+     cxxopts::Options commandArgOptions("Cranked", "A Playdate console emulator");
+     commandArgOptions.add_options()
+         ("d,debug", "GDB enable/port", cxxopts::value<int>())
+         ("p,pause", "Start paused", cxxopts::value<bool>())
+         ("arg", "playdate.argv values", cxxopts::value<vector<string>>())
+-        ("program", "The program to run", cxxopts::value<string>());
++        ("data", "Folder for save data (default: ./appData if it exists, else the user's data folder)", cxxopts::value<string>())
++        ("f,fullscreen", "Start fullscreen", cxxopts::value<bool>())
++        ("debugger-view", "Start with the debugger's windows instead of the player view", cxxopts::value<bool>())
++        ("program", "The game to run (a .pdx folder, or a zip of one); optional", cxxopts::value<string>());
+     commandArgOptions.parse_positional({"program"});
+ 
+-    // Todo: Catch and print out exceptions
+-    auto result = commandArgOptions.parse(argc, args);
+-    string programPath = result["program"].as<string>();
+-    int debugPort = result["debug"].as_optional<int>().value_or(0);
+-    bool startPaused = result["pause"].as_optional<bool>().value_or(false);
+-    vector<string> commandLineArgs = result["arg"].as_optional<vector<string>>().value_or(vector<string>{});
++    // a bad option or a missing game prints the usage instead of terminating with an uncaught exception
++    string programPath;
++    int debugPort;
++    bool startPaused;
++    vector<string> commandLineArgs;
++    string dataOption;
++    bool startFullscreen, startDebuggerView;
++    try {
++        auto result = commandArgOptions.parse(argc, args);
++        // the game is optional: without one the window opens empty, ready for File > Open or a dropped game
++        programPath = result["program"].as_optional<string>().value_or("");
++        debugPort = result["debug"].as_optional<int>().value_or(0);
++        startPaused = result["pause"].as_optional<bool>().value_or(false);
++        commandLineArgs = result["arg"].as_optional<vector<string>>().value_or(vector<string>{});
++        dataOption = result["data"].as_optional<string>().value_or("");
++        startFullscreen = result["fullscreen"].as_optional<bool>().value_or(false);
++        startDebuggerView = result["debugger-view"].as_optional<bool>().value_or(false);
++    } catch (std::exception &ex) {
++        fprintf(stderr, "%s\n%s\n", ex.what(), commandArgOptions.help().c_str());
++        return 1;
++    }
+ 
+     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO/* | SDL_INIT_GAMECONTROLLER*/)) // Initializing controller support takes several seconds...
+         throw CrankedError("Failed to init SDL: {}", SDL_GetError());
+ 
++    // where settings and save data live: ./appData and ./imgui.ini when they exist, else the user's
++    // data folder (SDL's preference path), so a packaged or wrapped game does not write next to wherever it was started
++    std::error_code fsError;
++    fs::path userFolder = sdlPath(SDL_GetPrefPath("Cranked", "Proof of Concept"));
++    if (userFolder.empty())
++        userFolder = ".";
++    fs::path dataFolder = !dataOption.empty() ? fs::path(dataOption) : fs::exists("appData", fsError) ? fs::path("appData") : userFolder / "Data";
++    static string iniPath = fs::exists("imgui.ini", fsError) ? string("imgui.ini") : (userFolder / "cranked.ini").string();
++
++    // a game inside the executable, or beside it, is the game to play (a game named on the command line wins)
++    bool wrapped = false;
++    if (programPath.empty()) {
++        try {
++            programPath = extractEmbeddedGame(args[0], userFolder / "Games");
++        } catch (std::exception &ex) {
++            fprintf(stderr, "%s\n", ex.what());
++        }
++        if (programPath.empty())
++            programPath = bundledGame();
++        wrapped = !programPath.empty();
++    }
++
+ #ifdef SDL_HINT_IME_SHOW_UI
+     SDL_SetHint(SDL_HINT_IME_SHOW_UI, "1");
+ #endif
+@@ -79,7 +213,8 @@ int main(int argc, const char *args[]) {
+ 
+     auto windowFlags = (SDL_WindowFlags) (SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+     // Todo: If window starts small, it squishes saved window positions
+-    SDL_Window* window = SDL_CreateWindow("Emulator", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1400, 1400, windowFlags);
++    // sized for the player view (the game at 2x under the menu bar); saved settings may resize it
++    SDL_Window* window = SDL_CreateWindow("Cranked", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, DISPLAY_WIDTH * 2, DISPLAY_HEIGHT * 2 + (wrapped ? 0 : 20), windowFlags);
+     if (!window)
+         throw CrankedError("Failed to create SDL window: {}", SDL_GetError());
+     SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_PRESENTVSYNC | SDL_RENDERER_ACCELERATED);
+@@ -89,7 +224,9 @@ int main(int argc, const char *args[]) {
+     IMGUI_CHECKVERSION();
+     auto imguiContext = ImGui::CreateContext();
+     ImGuiIO& io = ImGui::GetIO();
+-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad | ImGuiConfigFlags_DockingEnable;
++    // gamepads play the game rather than moving around the windows (no ImGuiConfigFlags_NavEnableGamepad)
++    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_DockingEnable;
++    io.IniFilename = iniPath.c_str();
+ 
+     ImGui::StyleColorsLight();
+ 
+@@ -170,6 +307,13 @@ int main(int argc, const char *args[]) {
+                 userdata->tryGetSetting("ShowWindow" + string(magic_enum::enum_name(value)), shown);
+                 userdata->windowStates[value] = shown;
+             }
++            userdata->tryGetSetting("PlayerView", userdata->playerView);
++            userdata->recentGames.clear();
++            for (int i = 0; i < MAX_RECENT; i++) {
++                string path;
++                if (userdata->tryGetSetting("Recent" + to_string(i), path) and !path.empty())
++                    userdata->recentGames.push_back(path);
++            }
+         };
+         settingsHandler.WriteAllFn = [](ImGuiContext *ctx, ImGuiSettingsHandler *handler, ImGuiTextBuffer *buf) {
+             auto userdata = (Userdata *)handler->UserData;
+@@ -185,6 +329,9 @@ int main(int argc, const char *args[]) {
+                 auto value = magic_enum::enum_value<Windows>(i);
+                 userdata->settings["ShowWindow" + string(magic_enum::enum_name(value))] = userdata->windowStates[value];
+             }
++            userdata->settings["PlayerView"] = userdata->playerView;
++            for (int i = 0; i < MAX_RECENT; i++)
++                userdata->settings["Recent" + to_string(i)] = i < (int) userdata->recentGames.size() ? userdata->recentGames[i] : string();
+ 
+             buf->append("[Cranked][Settings]\n");
+             for (const auto &entry : userdata->settings) {
+@@ -221,9 +368,32 @@ int main(int argc, const char *args[]) {
+     int newScale = 1;
+     bool firstFrame = true;
+     bool requestedStart = false;
++    string lastError; // why the game stopped, shown in the menu bar
+ 
+     int buttonInputs{};
+ 
++    // player features: opening games while running, gamepads, keyboard crank, fullscreen
++    cranked.files.appDataPath = dataFolder / "";
++    cranked.crankDocked = true;
++    string pendingOpen; // a game to open between updates (File > Open, Recent, a dropped file)
++    bool showMenuBar = !wrapped, fullscreen = false;
++    bool openDialogRequested = false, openZipRequested = false;
++    bool aboutRequested = false; // Help > About, opened outside the menu bar so the popup's ID matches
++    vector<SDL_GameController *> controllers;
++    if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0) // devices arrive as SDL_CONTROLLERDEVICEADDED events
++        printf("Gamepads unavailable: %s\n", SDL_GetError());
++    auto setFullscreen = [&](bool on) {
++        fullscreen = on;
++        showMenuBar = !on and !wrapped;
++        SDL_SetWindowFullscreen(window, on ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
++    };
++    if (startFullscreen)
++        setFullscreen(true);
++    auto turnCrank = [&](float degrees) {
++        cranked.crankAngle = fmodf(fmodf(cranked.crankAngle + degrees, 360) + 360, 360);
++        cranked.crankDocked = false;
++    };
++
+     // Todo: Extract the following disaster to separate functions
+     auto callback = [&](Cranked &cranked){
+         if (audioDevice) {
+@@ -240,13 +410,69 @@ int main(int argc, const char *args[]) {
+                 exited = true;
+                 cranked.terminate();
+             }
++            // player input: gamepads come and go; keys that act once per press; dropped games open
++            if (event.type == SDL_CONTROLLERDEVICEADDED) {
++                if (auto controller = SDL_GameControllerOpen(event.cdevice.which))
++                    controllers.push_back(controller);
++            } else if (event.type == SDL_CONTROLLERDEVICEREMOVED) {
++                std::erase_if(controllers, [&](SDL_GameController *c) {
++                    if (SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(c)) != event.cdevice.which)
++                        return false;
++                    SDL_GameControllerClose(c);
++                    return true;
++                });
++            } else if (event.type == SDL_DROPFILE) {
++                pendingOpen = event.drop.file;
++                SDL_free(event.drop.file);
++            } else if (event.type == SDL_KEYDOWN and !io.WantTextInput) {
++                auto key = event.key.keysym.scancode;
++                if (key == SDL_SCANCODE_F11 and !event.key.repeat)
++                    setFullscreen(!fullscreen);
++                else if (key == SDL_SCANCODE_F1 and !event.key.repeat)
++                    showMenuBar = !showMenuBar;
++                else if (key == SDL_SCANCODE_COMMA)
++                    turnCrank(-10);
++                else if (key == SDL_SCANCODE_PERIOD)
++                    turnCrank(10);
++                else if (key == SDL_SCANCODE_C and !event.key.repeat)
++                    cranked.crankDocked = !cranked.crankDocked;
++            } else if (event.type == SDL_MOUSEWHEEL and !io.WantCaptureMouse)
++                turnCrank(-event.wheel.preciseY * 15);
+         }
+ 
+-        constexpr int keys[] { SDL_SCANCODE_LEFT, SDL_SCANCODE_RIGHT, SDL_SCANCODE_UP, SDL_SCANCODE_DOWN, SDL_SCANCODE_A, SDL_SCANCODE_S, SDL_SCANCODE_Z, SDL_SCANCODE_X };
++        // the keys: arrows; Z or A for B; X or S for A; Enter for the menu (Lock is internal and has no key)
++        struct KeyBinding { SDL_Scancode key; PDButtons button; };
++        constexpr KeyBinding keys[] {
++            { SDL_SCANCODE_LEFT, PDButtons::Left }, { SDL_SCANCODE_RIGHT, PDButtons::Right }, { SDL_SCANCODE_UP, PDButtons::Up },
++            { SDL_SCANCODE_DOWN, PDButtons::Down }, { SDL_SCANCODE_Z, PDButtons::B }, { SDL_SCANCODE_A, PDButtons::B },
++            { SDL_SCANCODE_X, PDButtons::A }, { SDL_SCANCODE_S, PDButtons::A }, { SDL_SCANCODE_RETURN, PDButtons::Menu },
++        };
+         cranked.currentInputs = buttonInputs;
+-        for (int i = 0; i < sizeof(keys) / sizeof(keys[0]); i++)
+-            if (keyboardState[keys[i]])
+-                cranked.currentInputs |= (1 << i);
++        if (!io.WantTextInput)
++            for (auto &binding : keys)
++                if (keyboardState[binding.key])
++                    cranked.currentInputs |= (int) binding.button;
++        // gamepads (as the libretro core and the web page): d-pad or left stick; the right face button is A and
++        // the bottom one B; Start or Back the menu; the right stick points the crank, the shoulder buttons turn it
++        for (auto controller : controllers) {
++            auto pressed = [&](SDL_GameControllerButton b) { return SDL_GameControllerGetButton(controller, b) != 0; };
++            auto axis = [&](SDL_GameControllerAxis a) { return SDL_GameControllerGetAxis(controller, a) / 32767.0f; };
++            float lx = axis(SDL_CONTROLLER_AXIS_LEFTX), ly = axis(SDL_CONTROLLER_AXIS_LEFTY);
++            if (pressed(SDL_CONTROLLER_BUTTON_DPAD_LEFT) or lx < -0.5f) cranked.currentInputs |= (int) PDButtons::Left;
++            if (pressed(SDL_CONTROLLER_BUTTON_DPAD_RIGHT) or lx > 0.5f) cranked.currentInputs |= (int) PDButtons::Right;
++            if (pressed(SDL_CONTROLLER_BUTTON_DPAD_UP) or ly < -0.5f) cranked.currentInputs |= (int) PDButtons::Up;
++            if (pressed(SDL_CONTROLLER_BUTTON_DPAD_DOWN) or ly > 0.5f) cranked.currentInputs |= (int) PDButtons::Down;
++            if (pressed(SDL_CONTROLLER_BUTTON_A)) cranked.currentInputs |= (int) PDButtons::B; // SDL's A is the bottom button
++            if (pressed(SDL_CONTROLLER_BUTTON_B)) cranked.currentInputs |= (int) PDButtons::A; // and B the right one
++            if (pressed(SDL_CONTROLLER_BUTTON_START) or pressed(SDL_CONTROLLER_BUTTON_BACK)) cranked.currentInputs |= (int) PDButtons::Menu;
++            float rx = axis(SDL_CONTROLLER_AXIS_RIGHTX), ry = axis(SDL_CONTROLLER_AXIS_RIGHTY);
++            if (rx * rx + ry * ry > 0.25f) {
++                cranked.crankAngle = fmodf(atan2f(rx, -ry) * 180 / numbers::pi_v<float> + 360, 360);
++                cranked.crankDocked = false;
++            }
++            if (pressed(SDL_CONTROLLER_BUTTON_LEFTSHOULDER)) turnCrank(-6);
++            if (pressed(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER)) turnCrank(6);
++        }
+         buttonInputs = 0;
+ 
+         io.FontGlobalScale = scale;
+@@ -258,10 +484,28 @@ int main(int argc, const char *args[]) {
+         if (firstFrame) {
+             newScale = (int)scale;
+             firstFrame = false;
++            if (startDebuggerView)
++                userdata.playerView = false;
+         }
+ 
+-        if (ImGui::BeginMainMenuBar()) {
++        // the menu bar hides in fullscreen and for a wrapped game; F1 shows and hides it
++        if (showMenuBar and ImGui::BeginMainMenuBar()) {
+             if (ImGui::BeginMenu("File")) {
++                // games open while another runs; the new one replaces it between updates
++                if (ImGui::MenuItem("Open .pdx folder..."))
++                    openDialogRequested = true;
++                if (ImGui::MenuItem("Open zipped game..."))
++                    openZipRequested = true;
++                if (ImGui::BeginMenu("Recent", !userdata.recentGames.empty())) {
++                    for (auto &path : userdata.recentGames)
++                        if (ImGui::MenuItem(path.c_str()))
++                            pendingOpen = path;
++                    ImGui::Separator();
++                    if (ImGui::MenuItem("Clear"))
++                        userdata.recentGames.clear();
++                    ImGui::EndMenu();
++                }
++                ImGui::Separator();
+                 // Todo: Clean this up (Different menu? Termination should not be necessary) (Also just doesn't work correctly at preset)
+                 if (ImGui::MenuItem(cranked.state == Cranked::State::Stopped ? "Start" : cranked.state == Cranked::State::Stopping ? "Terminate" : "Stop")) {
+                     switch (cranked.state) {
+@@ -281,6 +525,11 @@ int main(int argc, const char *args[]) {
+                 ImGui::EndMenu();
+             }
+             if (ImGui::BeginMenu("View")) {
++                ImGui::MenuItem("Player view", nullptr, &userdata.playerView); // the game fills the window
++                if (ImGui::MenuItem("Fullscreen", "F11", fullscreen))
++                    setFullscreen(!fullscreen);
++                ImGui::MenuItem("Menu bar", "F1", &showMenuBar);
++                ImGui::Separator();
+                 if (ImGui::SliderInt("Scale", &newScale, 1, 6, "%dx", ImGuiSliderFlags_NoInput))
+                     wasScaling = true;
+                 ImGui::MenuItem("Show Debug", nullptr, &getWindowOpen(Windows::Debug));
+@@ -298,8 +547,29 @@ int main(int argc, const char *args[]) {
+                 scale = (float)newScale;
+                 wasScaling = false;
+             }
++            if (ImGui::BeginMenu("Help")) {
++                if (ImGui::MenuItem("About"))
++                    aboutRequested = true;
++                ImGui::EndMenu();
++            }
++            if (!lastError.empty())
++                ImGui::TextColored(ImVec4(0.6f, 0.0f, 0.0f, 1.0f), "Stopped: %s", lastError.c_str());
+             ImGui::EndMainMenuBar();
+         }
++        if (aboutRequested) {
++            ImGui::OpenPopup("About");
++            aboutRequested = false;
++        }
++        if (ImGui::BeginPopupModal("About", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) { // the fonts' CC BY 4.0 attribution
++            ImGui::TextUnformatted("Cranked (Proof of Concept)");
++            ImGui::Separator();
++            ImGui::TextUnformatted("Playdate fonts by Panic Inc., licensed under CC BY 4.0");
++            ImGui::TextUnformatted("(https://creativecommons.org/licenses/by/4.0/)");
++            ImGui::TextUnformatted("Playdate is a trademark of Panic Inc. This project is not affiliated with Panic.");
++            if (ImGui::Button("Close"))
++                ImGui::CloseCurrentPopup();
++            ImGui::EndPopup();
++        }
+ 
+         // ImGui::ShowDemoWindow();
+ 
+@@ -307,15 +577,50 @@ int main(int argc, const char *args[]) {
+ 
+         // Todo: Performance/stats window (Heap usage, frame times, program size), or just throw them around
+ 
+-        {
++        SDL_UpdateTexture(displayTexture, nullptr, cranked.graphics.displayBufferRGBA, 4 * DISPLAY_WIDTH);
++        if (userdata.playerView) { // the screen fills the window below the menu bar, at whole multiples when it can
++            auto viewport = ImGui::GetMainViewport();
++            ImVec2 origin = viewport->WorkPos, size = viewport->WorkSize;
++            float fit = min(size.x / DISPLAY_WIDTH, size.y / DISPLAY_HEIGHT);
++            float factor = fit >= 1 ? floorf(fit) : fit;
++            if (fit - factor > 0.25f * factor) // much room left over: fill it instead
++                factor = fit;
++            ImVec2 shown{ DISPLAY_WIDTH * factor, DISPLAY_HEIGHT * factor };
++            ImVec2 corner{ floorf(origin.x + (size.x - shown.x) / 2), floorf(origin.y + (size.y - shown.y) / 2) };
++            auto drawList = ImGui::GetBackgroundDrawList();
++            drawList->AddRectFilled(origin, ImVec2(origin.x + size.x, origin.y + size.y), ImGui::GetColorU32(bezelColor));
++            drawList->AddImage((ImTextureID) (intptr_t) displayTexture, corner, ImVec2(corner.x + shown.x, corner.y + shown.y));
++            if (!cranked.rom) {
++                const char *hint = "Open a game from the File menu, or drop a .pdx folder or a zipped game here";
++                auto textSize = ImGui::CalcTextSize(hint);
++                drawList->AddText(ImVec2(origin.x + (size.x - textSize.x) / 2, origin.y + (size.y - textSize.y) / 2), IM_COL32(255, 255, 255, 255), hint);
++            }
++        } else {
+             ImGui::PushStyleColor(ImGuiCol_WindowBg, bezelColor);
+             ImGui::Begin("Display", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_AlwaysAutoResize);
+-            SDL_UpdateTexture(displayTexture, nullptr, cranked.graphics.displayBufferRGBA, 4 * DISPLAY_WIDTH);
+             ImGui::Image((ImTextureID) (intptr_t) displayTexture, ImVec2(DISPLAY_WIDTH * scale, DISPLAY_HEIGHT * scale));
+             ImGui::End();
+             ImGui::PopStyleColor();
+         }
+ 
++        // the open dialogs (ImGuiFileDialog): a .pdx is a folder, so it is picked in the folder mode
++        if (openDialogRequested or openZipRequested) {
++            IGFD::FileDialogConfig config;
++            config.path = userdata.recentGames.empty() ? "." : fs::path(userdata.recentGames.front()).parent_path().string();
++            if (openDialogRequested)
++                ImGuiFileDialog::Instance()->OpenDialog("OpenGame", "Open a .pdx folder", nullptr, config);
++            else
++                ImGuiFileDialog::Instance()->OpenDialog("OpenGame", "Open a zipped game", ".zip", config);
++            openDialogRequested = openZipRequested = false;
++        }
++        if (ImGuiFileDialog::Instance()->Display("OpenGame", ImGuiWindowFlags_NoCollapse, ImVec2(500 * scale, 300 * scale))) {
++            if (ImGuiFileDialog::Instance()->IsOk()) {
++                auto selection = ImGuiFileDialog::Instance()->GetSelection();
++                pendingOpen = selection.empty() ? ImGuiFileDialog::Instance()->GetCurrentPath() : selection.begin()->second;
++            }
++            ImGuiFileDialog::Instance()->Close();
++        }
++
+         if (getWindowOpen(Windows::Debug)) {
+             ImGui::Begin("Debug", &getWindowOpen(Windows::Debug), ImGuiWindowFlags_None);
+ 
+@@ -575,26 +880,72 @@ int main(int argc, const char *args[]) {
+     };
+     cranked.config.updateCallback = callback;
+     cranked.config.debugPort = debugPort;
+-    cranked.load(programPath);
+-    if (!startPaused)
+-        cranked.start();
++    // a game that cannot be loaded, or that fails while running (a Lua error, an emulated crash, a bad API
++    // call), stops with a message instead of taking the emulator down; the window stays open with the last frame, and
++    // the menu bar shows the error
++    // opening a game: the first one, and any opened later (it replaces the one running, between updates)
++    auto openGame = [&](const string &path, bool start) {
++        lastError.clear();
++        try {
++            cranked.load(path);
++            cranked.crankDocked = true;
++            auto name = cranked.rom->getName();
++            SDL_SetWindowTitle(window, (name and *name) ? name : "Cranked");
++            if (!wrapped) {
++                addRecent(userdata.recentGames, fs::absolute(path, fsError).string());
++                ImGui::MarkIniSettingsDirty();
++            }
++            if (start)
++                cranked.start();
++        } catch (std::exception &ex) {
++            fprintf(stderr, "Failed to load %s: %s\n", path.c_str(), ex.what());
++            lastError = "Failed to load: " + string(ex.what());
++            cranked.terminate();
++        }
++    };
++    if (!programPath.empty())
++        openGame(programPath, !startPaused);
+ 
+     while (!exited) {
+         try {
++            if (!pendingOpen.empty()) {
++                string path = std::move(pendingOpen);
++                pendingOpen.clear();
++                openGame(path, true);
++            }
+             if (requestedStart) {
+-                cranked.start();
+                 requestedStart = false;
++                lastError.clear();
++                cranked.start();
+             }
+             cranked.update();
+-            // Todo: Sleep for the rest of the frame
++            // the loop (one update and one rendered window each time) runs at most 60 times a second: without
++            // vsync (a driver that ignores it, a virtual display) presenting returns at once, and the loop would spin
++            // at 100% CPU redrawing the window. With vsync the present has already waited and this does not sleep.
++            {
++                static Uint64 nextIteration = 0;
++                Uint64 frequency = SDL_GetPerformanceFrequency(), now = SDL_GetPerformanceCounter(), period = frequency / 60;
++                if (nextIteration > now and nextIteration - now <= period) {
++                    SDL_Delay((Uint32) ((nextIteration - now) * 1000 / frequency));
++                    nextIteration += period;
++                } else
++                    nextIteration = now + period;
++            }
+         } catch (NativeEngine::NativeExecutionError &ex) {
+             printf("Uncaught native execution error: %s\n%s", ex.what(), ex.getDump().c_str());
+-            exited = true;
++            lastError = ex.what();
++            cranked.terminate();
++        } catch (std::exception &ex) {
++            printf("Game stopped: %s\n", ex.what());
++            lastError = ex.what();
++            cranked.terminate();
+         }
+     }
+ 
+     if (audioDevice)
+         SDL_CloseAudioDevice(audioDevice);
++    for (auto controller : controllers)
++        SDL_GameControllerClose(controller);
+ 
+     SDL_DestroyTexture(displayTexture);
+ 
+diff --git a/java/java.cpp b/java/java.cpp
+index 21b159e..5763622 100644
+--- a/java/java.cpp
++++ b/java/java.cpp
+@@ -1,6 +1,9 @@
+ #include "Cranked.hpp"
+ #include "jni.h"
+ 
++#include <cmath>
++#include <type_traits>
++
+ using namespace cranked;
+ 
+ #if __ANDROID__
+@@ -30,15 +33,29 @@ static void log(LogLevel level, const char *fmt, ...) {
+ }
+ #endif
+ 
+-static JNIEnv* environment;
++static JavaVM *javaVM; // a JNIEnv is valid only on its own thread; callbacks get theirs from the VM
+ static jclass crankedClass;
+ static jmethodID updateCallbackMethodId;
+ 
++// a game error (a Lua error, an emulated crash, a missing game) becomes a Java RuntimeException with the
++// message, instead of a C++ exception crossing JNI, which aborts the process
++template<typename F>
++static auto guarded(JNIEnv *env, F &&f) -> decltype(f()) {
++    try {
++        return f();
++    } catch (std::exception &e) {
++        if (auto type = env->FindClass("java/lang/RuntimeException")) env->ThrowNew(type, e.what());
++    } catch (...) {
++        if (auto type = env->FindClass("java/lang/RuntimeException")) env->ThrowNew(type, "Cranked: unknown error");
++    }
++    if constexpr (!std::is_void_v<decltype(f())>) return {};
++}
++
+ extern "C" {
+ 
+ JNIEXPORT jlong JNICALL Java_com_thelogicmaster_cranked_Cranked_initialize(JNIEnv *env, jobject object, jstring appDataPath) {
+     if (!crankedClass) {
+-        environment = env;
++        env->GetJavaVM(&javaVM);
+         crankedClass = (jclass) env->NewGlobalRef(env->GetObjectClass(object));
+         updateCallbackMethodId = env->GetMethodID(crankedClass, "updateCallback", "()V");
+     }
+@@ -46,7 +63,9 @@ JNIEXPORT jlong JNICALL Java_com_thelogicmaster_cranked_Cranked_initialize(JNIEn
+     auto cranked = new Cranked;
+     cranked->config.userdata = env->NewGlobalRef(object);
+     cranked->config.updateCallback = [](Cranked &cranked) {
+-        environment->CallVoidMethod((jobject) cranked.config.userdata, updateCallbackMethodId);
++        JNIEnv *callbackEnv = nullptr;
++        if (javaVM and javaVM->GetEnv((void **) &callbackEnv, JNI_VERSION_1_6) == JNI_OK and callbackEnv and updateCallbackMethodId)
++            callbackEnv->CallVoidMethod((jobject) cranked.config.userdata, updateCallbackMethodId);
+     };
+     cranked->config.loggingCallback = [](Cranked &emulator, LogLevel logLevel, const char *fmt, va_list args){
+         logVA(logLevel, fmt, args);
+@@ -68,32 +87,33 @@ JNIEXPORT void JNICALL Java_com_thelogicmaster_cranked_Cranked_destroy(JNIEnv *e
+ JNIEXPORT void JNICALL Java_com_thelogicmaster_cranked_Cranked_load(JNIEnv *env, jclass clazz, jlong ptr, jstring path) {
+     auto cranked = (Cranked *) (intptr_t) ptr;
+     auto pathChars = env->GetStringUTFChars(path, nullptr);
+-    cranked->load(pathChars);
++    string pathString = pathChars;
+     env->ReleaseStringUTFChars(path, pathChars);
++    guarded(env, [&] { cranked->load(pathString); });
+ }
+ 
+ JNIEXPORT void JNICALL Java_com_thelogicmaster_cranked_Cranked_unload(JNIEnv *env, jclass clazz, jlong ptr) {
+-    ((Cranked *) (intptr_t) ptr)->unload();
++    guarded(env, [&] { ((Cranked *) (intptr_t) ptr)->unload(); });
+ }
+ 
+ JNIEXPORT void JNICALL Java_com_thelogicmaster_cranked_Cranked_start(JNIEnv *env, jclass clazz, jlong ptr) {
+-    ((Cranked *) (intptr_t) ptr)->start();
++    guarded(env, [&] { ((Cranked *) (intptr_t) ptr)->start(); });
+ }
+ 
+ JNIEXPORT void JNICALL Java_com_thelogicmaster_cranked_Cranked_update(JNIEnv *env, jclass clazz, jlong ptr) {
+-    ((Cranked *) (intptr_t) ptr)->update();
++    guarded(env, [&] { ((Cranked *) (intptr_t) ptr)->update(); });
+ }
+ 
+ JNIEXPORT void JNICALL Java_com_thelogicmaster_cranked_Cranked_stop(JNIEnv *env, jclass clazz, jlong ptr) {
+-    ((Cranked *) (intptr_t) ptr)->stop();
++    guarded(env, [&] { ((Cranked *) (intptr_t) ptr)->stop(); });
+ }
+ 
+ JNIEXPORT void JNICALL Java_com_thelogicmaster_cranked_Cranked_terminate(JNIEnv *env, jclass clazz, jlong ptr) {
+-    ((Cranked *) (intptr_t) ptr)->terminate();
++    guarded(env, [&] { ((Cranked *) (intptr_t) ptr)->terminate(); });
+ }
+ 
+ JNIEXPORT void JNICALL Java_com_thelogicmaster_cranked_Cranked_reset(JNIEnv *env, jclass clazz, jlong ptr) {
+-    ((Cranked *) (intptr_t) ptr)->reset();
++    guarded(env, [&] { ((Cranked *) (intptr_t) ptr)->reset(); });
+ }
+ 
+ JNIEXPORT jint JNICALL Java_com_thelogicmaster_cranked_Cranked_getState(JNIEnv *env, jclass clazz, jlong ptr) {
+@@ -108,4 +128,36 @@ JNIEXPORT void JNICALL Java_com_thelogicmaster_cranked_Cranked_copyDisplayBuffer
+     memcpy(bufferPtr, cranked->graphics.displayBufferRGBA, size);
+ }
+ 
++// input, crank, audio and clock, which a front end needs (the Java class declares them as native)
++
++JNIEXPORT void JNICALL Java_com_thelogicmaster_cranked_Cranked_setButtons(JNIEnv *env, jclass clazz, jlong ptr, jint buttons) {
++    ((Cranked *) (intptr_t) ptr)->currentInputs = buttons & 0xFF; // PDButtons bits: left 1, right 2, up 4, down 8, B 16, A 32, menu 128
++}
++
++JNIEXPORT void JNICALL Java_com_thelogicmaster_cranked_Cranked_setCrank(JNIEnv *env, jclass clazz, jlong ptr, jfloat angle, jboolean docked) {
++    auto cranked = (Cranked *) (intptr_t) ptr;
++    if (angle == angle) { // not NaN
++        angle = fmodf(angle, 360.0f);
++        cranked->crankAngle = angle < 0 ? angle + 360.0f : angle;
++    }
++    cranked->crankDocked = docked;
++}
++
++// Mixes `frames` stereo frames of 16-bit audio at 44.1 kHz into a direct buffer of at least frames * 4 bytes
++JNIEXPORT void JNICALL Java_com_thelogicmaster_cranked_Cranked_sampleAudio(JNIEnv *env, jclass clazz, jlong ptr, jobject buffer, jint frames) {
++    if (frames <= 0) return;
++    auto bufferPtr = (int16 *) env->GetDirectBufferAddress(buffer);
++    if (!bufferPtr or env->GetDirectBufferCapacity(buffer) < (jlong) frames * 4) return;
++    guarded(env, [&] { ((Cranked *) (intptr_t) ptr)->audio.sampleAudio(bufferPtr, frames); });
++}
++
++// The game's clock then advances only by advanceClock (deterministic runs, front-end pacing)
++JNIEXPORT void JNICALL Java_com_thelogicmaster_cranked_Cranked_useVirtualClock(JNIEnv *env, jclass clazz, jlong ptr) {
++    ((Cranked *) (intptr_t) ptr)->useVirtualClock();
++}
++
++JNIEXPORT void JNICALL Java_com_thelogicmaster_cranked_Cranked_advanceClock(JNIEnv *env, jclass clazz, jlong ptr, jlong micros) {
++    ((Cranked *) (intptr_t) ptr)->advanceVirtualClock(micros);
++}
++
+ }
+diff --git a/libretro/CMakeLists.txt b/libretro/CMakeLists.txt
+index 7425778..5b48547 100644
+--- a/libretro/CMakeLists.txt
++++ b/libretro/CMakeLists.txt
+@@ -35,6 +35,11 @@ endif()
+ add_library(cranked_libretro SHARED core.cpp)
+ target_include_directories(cranked_libretro PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+ target_link_libraries(cranked_libretro cranked)
++# the file name frontends expect: cranked_libretro.so/.dll/.dylib, and cranked_libretro_android.so on Android
++set_target_properties(cranked_libretro PROPERTIES PREFIX "")
++if (ANDROID)
++    set_target_properties(cranked_libretro PROPERTIES OUTPUT_NAME cranked_libretro_android)
++endif ()
+ 
+ if (WIN32)
+     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /MP /Zc:__cplusplus")
+diff --git a/libretro/core.cpp b/libretro/core.cpp
+index 4a423c8..ba10fa8 100644
+--- a/libretro/core.cpp
++++ b/libretro/core.cpp
+@@ -6,6 +6,8 @@
+ #include <cstdlib>
+ #include <cstdarg>
+ #include <cstring>
++#include <cmath>
++#include <vector>
+ 
+ using namespace cranked;
+ 
+@@ -32,10 +34,69 @@ static void emulatorCallback(Cranked &context) {
+ 
+ }
+ 
++// a game error (a Lua error, an emulated crash) stops the game and is logged, instead of an exception
++// leaving the core, which would take the frontend down with it. The last frame stays on screen.
++static bool failed;
++static constexpr int AUDIO_RATE = 44100, FRAME_RATE = 60;
++
++template<typename F>
++static bool guarded(const char *what, F &&f) {
++    try {
++        f();
++        return true;
++    } catch (std::exception &e) {
++        log_cb(RETRO_LOG_ERROR, "Cranked: %s failed: %s\n", what, e.what());
++    } catch (...) {
++        log_cb(RETRO_LOG_ERROR, "Cranked: %s failed\n", what);
++    }
++    failed = true;
++    return false;
++}
++
++// RetroPad to Playdate: the d-pad and A and B as they are, Start for the system menu. The crank follows
++// the right stick's direction (0 degrees up, clockwise) while the stick is pushed, and L and R turn it by 6 degrees a
++// frame; it is docked until either is used.
++static void readInput() {
++    auto pressed = [](unsigned id) { return input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, id) != 0; };
++    int32 buttons = 0;
++    if (pressed(RETRO_DEVICE_ID_JOYPAD_LEFT)) buttons |= (int32) PDButtons::Left;
++    if (pressed(RETRO_DEVICE_ID_JOYPAD_RIGHT)) buttons |= (int32) PDButtons::Right;
++    if (pressed(RETRO_DEVICE_ID_JOYPAD_UP)) buttons |= (int32) PDButtons::Up;
++    if (pressed(RETRO_DEVICE_ID_JOYPAD_DOWN)) buttons |= (int32) PDButtons::Down;
++    if (pressed(RETRO_DEVICE_ID_JOYPAD_B)) buttons |= (int32) PDButtons::B;
++    if (pressed(RETRO_DEVICE_ID_JOYPAD_A)) buttons |= (int32) PDButtons::A;
++    if (pressed(RETRO_DEVICE_ID_JOYPAD_START)) buttons |= (int32) PDButtons::Menu;
++    instance->currentInputs = buttons;
++
++    float x = (float) input_state_cb(0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_X) / 32768.0f;
++    float y = (float) input_state_cb(0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_Y) / 32768.0f;
++    float angle = instance->crankAngle;
++    bool used = false;
++    if (x * x + y * y > 0.5f * 0.5f) {
++        angle = atan2f(x, -y) * (180.0f / 3.14159265f); // (M_PI is not standard C++)
++        used = true;
++    }
++    if (pressed(RETRO_DEVICE_ID_JOYPAD_L)) { angle -= 6.0f; used = true; }
++    if (pressed(RETRO_DEVICE_ID_JOYPAD_R)) { angle += 6.0f; used = true; }
++    if (used) {
++        angle = fmodf(angle, 360.0f);
++        if (angle < 0) angle += 360.0f;
++        instance->crankAngle = angle;
++        instance->crankDocked = false;
++    }
++}
++
+ void retro_init() {
+     instance = new Cranked;
+     instance->config.updateCallback = emulatorCallback;
+     instance->graphics.displayBufferNativeEndian = true;
++    // the game's clock advances by one frontend frame per retro_run, so the frontend sets the pace
++    // (fast-forward, slow motion, frame stepping) and runs are reproducible
++    instance->useVirtualClock();
++    // the frame is given to the frontend as XRGB8888 (0x00RRGGBB); the default colors are RGBA
++    // (0xRRGGBBAA), which a frontend shows with the channels shifted (a blue tint)
++    instance->graphics.displayBufferOnColor = instance->graphics.displayBufferOnColor >> 8;
++    instance->graphics.displayBufferOffColor = instance->graphics.displayBufferOffColor >> 8;
+ }
+ 
+ void retro_deinit() {
+@@ -45,15 +106,28 @@ void retro_deinit() {
+ }
+ 
+ void retro_reset() {
+-    instance->reset();
++    guarded("reset", [] { instance->reset(); });
+ }
+ 
+ void retro_run() {
+     input_poll_cb();
++    if (!failed) {
++        readInput();
++        instance->advanceVirtualClock(1000000 / FRAME_RATE);
++        guarded("update", [] { instance->update(); });
++    }
+ 
+-    audio_cb(0, 0);
+-
+-    instance->update();
++    // one frame of audio at 44.1 kHz (silence once the game has stopped)
++    static double carry;
++    carry += (double) AUDIO_RATE / FRAME_RATE;
++    int samples = (int) carry;
++    carry -= samples;
++    static std::vector<int16_t> buffer;
++    buffer.assign((size_t) samples * 2, 0);
++    if (!failed)
++        guarded("audio", [&] { instance->audio.sampleAudio(buffer.data(), samples); });
++    if (audio_batch_cb)
++        audio_batch_cb(buffer.data(), (size_t) samples);
+ 
+     video_cb(instance->graphics.displayBufferRGBA, DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_WIDTH * sizeof(uint32));
+ }
+@@ -65,14 +139,23 @@ bool retro_load_game(const retro_game_info *info) {
+         return false;
+     }
+ 
+-    instance->load(info->path);
+-    instance->start();
+-
+-    return true;
++    if (!info or !info->path) // no content: nothing to run
++        return false;
++    failed = false;
++    instance->crankDocked = true;
++    // game data (saves, datastore) goes in the frontend's save directory, in a "Cranked" folder, rather
++    // than "appData" in whatever the frontend's working directory is (which may not be writable)
++    const char *saveDirectory = nullptr;
++    if (environ_cb(RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY, &saveDirectory) and saveDirectory and *saveDirectory)
++        instance->files.appDataPath = fs::path(saveDirectory) / "Cranked" / "";
++    return guarded("loading the game", [&] {
++        instance->load(info->path);
++        instance->start();
++    });
+ }
+ 
+ void retro_unload_game() {
+-    instance->unload();
++    guarded("unloading the game", [] { instance->unload(); });
+ }
+ 
+ unsigned int retro_api_version(void) {
+@@ -89,11 +172,11 @@ void retro_get_system_info(struct retro_system_info *info) {
+     info->library_version = "v1";
+     info->need_fullpath = true;
+     info->block_extract = true;
+-    info->valid_extensions = "pdz.zip|.zip";
++    info->valid_extensions = "pdx|zip"; // a game folder or a zipped one
+ }
+ 
+ void retro_get_system_av_info(struct retro_system_av_info *info) {
+-    info->timing = {.fps = 60.0, .sample_rate = 0.0};
++    info->timing = {.fps = (double) FRAME_RATE, .sample_rate = (double) AUDIO_RATE}; // audio is produced every frame
+ 
+     info->geometry = {
+             .base_width = DISPLAY_WIDTH,
+@@ -107,7 +190,7 @@ void retro_get_system_av_info(struct retro_system_av_info *info) {
+ void retro_set_environment(retro_environment_t cb) {
+     environ_cb = cb;
+ 
+-    bool no_content = true;
++    bool no_content = false; // a game is required (retro_load_game refuses no content)
+     cb(RETRO_ENVIRONMENT_SET_SUPPORT_NO_GAME, &no_content);
+ 
+     if (cb(RETRO_ENVIRONMENT_GET_LOG_INTERFACE, &logging))
+diff --git a/web/CMakeLists.txt b/web/CMakeLists.txt
+new file mode 100644
+index 0000000..fded56d
+--- /dev/null
++++ b/web/CMakeLists.txt
+@@ -0,0 +1,11 @@
++# browser front end (Emscripten only): cranked.js and cranked.wasm, loaded by index.html. The exception mode
++# (-fexceptions or -fwasm-exceptions) comes from CMAKE_CXX_FLAGS and CMAKE_EXE_LINKER_FLAGS.
++add_executable(cranked_web main.cpp)
++target_link_libraries(cranked_web cranked)
++set_target_properties(cranked_web PROPERTIES OUTPUT_NAME cranked)
++target_link_options(cranked_web PRIVATE -sMODULARIZE=1 -sEXPORT_NAME=createCranked -sALLOW_MEMORY_GROWTH=1
++        -sSTACK_SIZE=4194304 -sINITIAL_MEMORY=67108864 -sFORCE_FILESYSTEM=1 -lidbfs.js
++        "-sEXPORTED_RUNTIME_METHODS=['FS','IDBFS','ccall','cwrap','HEAPU8','HEAP16','stackSave','stackRestore','stackAlloc']" "-sEXPORTED_FUNCTIONS=['_malloc','_free']")
++foreach (file index.html engine.js worker.js audio-worklet.js zip.js sw.js manifest.webmanifest icon-192.png icon-512.png)
++    configure_file(${file} ${CMAKE_CURRENT_BINARY_DIR}/${file} COPYONLY)
++endforeach ()
+diff --git a/web/audio-worklet.js b/web/audio-worklet.js
+new file mode 100644
+index 0000000..976b965
+--- /dev/null
++++ b/web/audio-worklet.js
+@@ -0,0 +1,29 @@
++// Browser front end: plays the interleaved 16-bit stereo chunks the engine worker sends (over a MessagePort).
++// About 60 ms is buffered before playing; an underrun plays silence and waits for that much again, and when more than
++// 250 ms is queued (the worker's clock running ahead of the audio clock) the oldest chunks are dropped.
++class CrankedAudio extends AudioWorkletProcessor {
++  constructor() {
++    super();
++    this.queue = []; this.offset = 0; this.queued = 0; this.started = false;
++    this.port.onmessage = e => { if (e.data && e.data.port) e.data.port.onmessage = m => this.push(m.data); };
++  }
++  push(chunk) {
++    this.queue.push(chunk); this.queued += chunk.length / 2;
++    const max = sampleRate * 0.25;
++    while (this.queued > max && this.queue.length > 1) { const old = this.queue.shift(); this.queued -= (old.length - this.offset) / 2; this.offset = 0; }
++  }
++  process(inputs, outputs) {
++    const left = outputs[0][0], right = outputs[0][1] || outputs[0][0];
++    if (!this.started && this.queued >= sampleRate * 0.06) this.started = true;
++    for (let i = 0; i < left.length; i++) {
++      if (!this.started || !this.queue.length) { left[i] = right[i] = 0; continue; }
++      const chunk = this.queue[0];
++      left[i] = chunk[this.offset] / 32768; right[i] = chunk[this.offset + 1] / 32768;
++      this.offset += 2; this.queued--;
++      if (this.offset >= chunk.length) { this.queue.shift(); this.offset = 0; }
++    }
++    if (!this.queue.length) this.started = false; // underrun: wait for the buffer to fill again
++    return true;
++  }
++}
++registerProcessor("cranked-audio", CrankedAudio);
+diff --git a/web/engine.js b/web/engine.js
+new file mode 100644
+index 0000000..ca38e68
+--- /dev/null
++++ b/web/engine.js
+@@ -0,0 +1,127 @@
++// Browser front end: the engine (loading, the frame loop, audio). It runs on the page's own thread (the
++// default) or in a worker (worker.js, with ?worker=1), with the same messages either way. Messages to it: load (a
++// zip's bytes or a folder's files), input, pause, resume, audioPort (a MessagePort to the page's AudioWorklet).
++// Messages from it: ready, loaded, frame (RGBA), stopped.
++"use strict";
++function createCrankedEngine(postMessage, transfers) {
++
++const RATE = 44100, STEP_MS = 1000 / 60;
++let M = null, running = false, paused = false, timer = 0, last = 0, carry = 0;
++let input = { buttons: 0, crank: 0, docked: true };
++let audioPort = null, audioPtr = 0, frameMs = 0;
++let frameFn, audioFn, failedFn;
++
++createCranked({ printErr: t => console.warn(t), print: t => console.log(t) }).then(module => {
++  M = module;
++  frameFn = M.cwrap("web_frame", "number", ["number", "number", "number", "number"]);
++  audioFn = M.cwrap("web_audio", null, ["number", "number"]);
++  failedFn = M.cwrap("web_failed", "number", []);
++  audioPtr = M._malloc(RATE * 4);
++  try { M.FS.mkdir("/appData"); } catch (e) {}
++  M.FS.mount(M.IDBFS, {}, "/appData");
++  M.FS.syncfs(true, () => postMessage({ type: "ready" }));
++  setInterval(() => { if (running) M.FS.syncfs(false, () => {}); }, 5000);
++});
++
++function rmTree(path) {
++  try {
++    for (const name of M.FS.readdir(path)) {
++      if (name === "." || name === "..") continue;
++      const full = path + "/" + name;
++      if (M.FS.isDir(M.FS.stat(full).mode)) rmTree(full); else M.FS.unlink(full);
++    }
++    M.FS.rmdir(path);
++  } catch (e) {}
++}
++
++function load(msg) {
++  stop();
++  let path;
++  if (msg.kind === "zip") { M.FS.writeFile("/game.zip", msg.zip); path = "/game.zip"; }
++  else {
++    rmTree("/game.pdx"); M.FS.mkdir("/game.pdx");
++    for (const f of msg.files) {
++      const parts = f.path.split("/"); let dir = "/game.pdx";
++      for (const p of parts.slice(0, -1)) { dir += "/" + p; try { M.FS.mkdir(dir); } catch (err) {} }
++      M.FS.writeFile(dir + "/" + parts[parts.length - 1], f.data);
++    }
++    path = "/game.pdx";
++  }
++  const t0 = performance.now();
++  const ok = M.ccall("web_load", "number", ["string"], [path]) === 1;
++  const info = key => M.ccall("web_info", "string", ["string"], [key]);
++  postMessage({ type: "loaded", ok, error: ok ? "" : M.ccall("web_error", "string", [], []), loadMs: performance.now() - t0,
++                info: ok ? { name: info("name"), author: info("author"), bundleID: info("bundleID"), dataFolder: info("_dataFolder") } : null });
++  if (ok) { running = true; paused = false; last = 0; carry = 0; frameMs = 0; schedule(0); }
++}
++
++function stop() { running = false; clearTimeout(timer); }
++function schedule(delay) { clearTimeout(timer); timer = setTimeout(step, delay); }
++
++function step() {
++  if (!running || paused) return;
++  const now = performance.now();
++  const dt = last ? Math.min(now - last, 100) : STEP_MS; // a stall does not make the game jump
++  last = now;
++  const ptr = frameFn(input.buttons, input.crank, input.docked ? 1 : 0, Math.round(dt * 1000));
++  const spent = performance.now() - now;
++  frameMs = frameMs ? frameMs * 0.95 + spent * 0.05 : spent;
++  if (ptr) {
++    const rgba = M.HEAPU8.slice(ptr, ptr + 400 * 240 * 4); // a copy, so it can be transferred
++    postMessage({ type: "frame", rgba: rgba.buffer, frameMs }, transfers ? [rgba.buffer] : undefined);
++  }
++  carry += RATE * dt / 1000; const frames = Math.min(Math.floor(carry), RATE); carry -= Math.floor(carry);
++  if (frames > 0) {
++    audioFn(audioPtr, frames);
++    if (audioPort) {
++      const chunk = M.HEAP16.slice(audioPtr >> 1, (audioPtr >> 1) + frames * 2);
++      audioPort.postMessage(chunk, [chunk.buffer]);
++    }
++  }
++  if (failedFn()) { stop(); postMessage({ type: "stopped", error: M.ccall("web_error", "string", [], []) }); return; }
++  schedule(Math.max(0, STEP_MS - (performance.now() - now)));
++}
++
++return e => {
++  const msg = e.data;
++  if (msg.type === "load") { if (M) load(msg); }
++  else if (msg.type === "input") input = msg.input;
++  else if (msg.type === "pause") { paused = true; clearTimeout(timer); if (M) M.FS.syncfs(false, () => {}); }
++  else if (msg.type === "resume") { if (running && paused) { paused = false; last = 0; schedule(0); } }
++  else if (msg.type === "audioPort") audioPort = msg.port;
++  else if (msg.type === "exportSaves") { if (M) exportSaves(msg.folder); }
++  else if (msg.type === "importSaves") { if (M) importSaves(msg.folder, msg.files); }
++};
++
++// Save data: /appData/<data folder>/... (the folder is the game's bundle ID). A game's data is replaced only while
++// the game is stopped; the page loads the game again afterwards.
++function safeFolder(name) { return typeof name === "string" && /^[^/\\]+$/.test(name) && name !== "." && name !== ".."; }
++function exportSaves(folder) {
++  const files = [];
++  const walk = (dir, rel) => {
++    for (const name of M.FS.readdir(dir)) {
++      if (name === "." || name === "..") continue;
++      const full = dir + "/" + name, path = rel ? rel + "/" + name : name;
++      if (M.FS.isDir(M.FS.stat(full).mode)) walk(full, path); else files.push({ path, data: M.FS.readFile(full) });
++    }
++  };
++  try { if (safeFolder(folder)) walk("/appData/" + folder, ""); } catch (e) {}
++  postMessage({ type: "saves", folder, files });
++}
++function importSaves(folder, files) {
++  if (!safeFolder(folder)) { postMessage({ type: "imported", ok: false, error: "no data folder" }); return; }
++  stop();
++  M.ccall("web_unload", null, [], []);
++  const root = "/appData/" + folder;
++  rmTree(root);
++  try { M.FS.mkdir(root); } catch (e) {}
++  for (const f of files) {
++    const parts = f.path.split("/").filter(p => p && p !== "." && p !== "..");
++    if (!parts.length) continue;
++    let dir = root;
++    for (const p of parts.slice(0, -1)) { dir += "/" + p; try { M.FS.mkdir(dir); } catch (e) {} }
++    M.FS.writeFile(dir + "/" + parts[parts.length - 1], f.data);
++  }
++  M.FS.syncfs(false, err => postMessage({ type: "imported", ok: !err, error: err ? String(err) : "" }));
++}
++}
+diff --git a/web/icon-192.png b/web/icon-192.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..35afe400aaf502011418deeaa5b2264c565c638e
+GIT binary patch
+literal 1713
+zcmZ`)dsxzG7XE$+NsuY#E!WhfNzyD=$FW*3lo!(75=}uFXCQBsX=;tyqY3CTT53^w
+zTg61BMo002w=6eB$t}rS&Cq3q6sgQxgWE+?f}!1K|JrB&_|EyB^S<Z%<DB!J?;`Oi
+z!3brI0st5V9rh2?d(oGJ+@QB%vLr(QHk=FcKNx<ldRgv$Sr%x;R-{;tpErQ=+<2n)
+zEe3ar&R!3^{acLaq7e`OJO+}Bgf_^|`raK4L5$Dhrq!V3>x%c`>7E7dzxr)@DWCGB
+zX4x4mWM^qLlj~Ne@7N-93I5ZEzRrn(aZFv%k6vCx`dmH{%5Dn5tFG21V4A#K2MI<V
+zg;&;Ca66Yc3&kH7bCJH3kx@!8r1uXcvY&6VXJX;>9{&O|7~+IhkIdG=Oc=$lPwdRJ
+zWT|4q2_3ha0o#s0#eFoZ2cm~-1QzBjl`=8dotv?JQ*V7Ag7)!#L|I&Br=CX6+$(NI
+z*lUQwviNa`mMjFLT4HDUNfL<6jsOYFMvCMcXCTN~^-fG+#;I3%10>zl#DM0B>TvlH
+zrmxCx!XWo@%VgVUCbm=&kG{9W;RlO(A2R7jI>%8gu^a4scJcSkkmKOK9oZk>c3Ts{
+z63JQM9jvk%)Y>slSJDxpJ>B&AC(QtX7m^f7Q7{xZ#aYrR7QU1&5+dIC@Z#^%ccCDX
+z584AE+9jCC8o~0=lgz*q94PG4_A{F2_yG5Kaeb{j6v%E`Ymq3{pR(8kuQG~Yw6ZKU
+z76(YUl<c2y;QM)Vt!-xhOb_mo=F>`pocT^GZa@(_#&&5i7-Nn7&grY|6-`m70&krS
+z;&7Pz`%`WYXRP$^r3P~*+x8#JFII(!z1GIk8gL>Ai(sBk!E}h39%i(HtAF(+hrw4>
+z1R~3UjMB;|7^IFIZP=@nC^(Tmj3J$ov#7AykU6q$%tPunIg4P!DuU~~y>-C7NugVL
+z>U-2TpQ6U9o$jHfGXxW@ivS!{{}yV*gd?tOW^Q<;BK*w~@2#QJnIBXHD}A3+&LWxY
+zG^iA#JyVV#)_mTm^U2V+aZ$Uzo;kk~6%zqod3s_so)YEP^av19smP2y2Bc9g%0o|0
+zr7KmPIMxEU5~FQ-PED8nv>R31n4$jefh9i8;?!2g@Cx_ZUY2!&Hu^Dw$i18OBQ@Ek
+z;Rd>vT{*D%ISe;O!Lq3*y&B@swJ~g!v(oYEwj_C1;(=dGwQD<4iri+;$d%<kdJIh~
+z%a=Wbu<(o>uKau|W)7HRv@0X#w9;ixqMEREdiNQGRc@l%Jd_p3)=_YHhasl7SuJ*G
+znimdb)ztocew=z}-aoPlkOz|`_YXqWSWRpl*!VGtIi8=nwwg%&^P61Q52;=7QOzeD
+z-Z5MJ7xiK-*jAQbrF!ZI9q6+>Jw&xcScxbPHZpU}XeRI4w`jk?;qwH}{9BV1`PBKs
+zq`hV|*HKNfe!5DW@DtAbmRnfz+U)d$8z`_80GW1ImF@pD<_BGqZgx~m1VB!W=3zs;
+zkXFF2u8l89FI92e`lDW=T(1cxFPky~WY)rtZ_jZ?tKkDaBV1)*@wS@BeSVz4<n=9s
+zsLA06+cU-cfndY}pLY9gP`Xz<8kAny!&(qXtNyhw*b?*-`hldAj9ySWQUR?f0Q!|K
+zq}cpptR7%&QxbMotaR)G?f06%p3Z+p9aY9fu#jz@tH@g`LT5aCnj0-ii{6a}vS${e
+zw4SNi1GYVg3#y!7=Bn=x-T{~wDGYeqbU(oKZ%@sUAL|&{=p#|g6~c9YAhEW7NNpVG
+zzl#&Wq*ogITiu_*<aO;|Ij9#Sp|`zR=UN$>ZXs+b^`?|HQ&9&Di=*Lr1ICDb$8R{8
+zXku~rYqs(B@8?2UsKoNz$+>!P$z~VgcpFEr)2II<SHb_&vB2BMo5^^SV}dshnc&$)
+z{x`Gx{)M*ex)+A9t{)zH>G#lo@;`=waf6wds&xI9T5kmc7}0ZLpB}yI1e!s(OFY*c
+zJh4EFoPfuv$^-<fTMBDO;fG1(o@5ZrYVNC0^nGiuzc`KTnFH;la6p2hkDN>>`ZxNl
+zMEczq^wILzo4056{LpP9uj@)^`iRZgOGQX74hl@$S+r~WYrCmH<E<sBl5{{a=qfL}
+z-Gx403R>b4T7pkJH?7OJE=iI`aUJaa#^eDd$>;zP#-&GkWOdmL`ifE$lHr|p)8xXN
+kbx1<w$%sf}Y)*{YSCdEQ*QaD%*MCJIDB!4n>mgd+?|0k}asU7T
+
+literal 0
+HcmV?d00001
+
+diff --git a/web/icon-512.png b/web/icon-512.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..9584d6bef878bbf5d60255e0bacc80921a4208f8
+GIT binary patch
+literal 5053
+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
+K*S*M%pZGt(`3Ow_
+
+literal 0
+HcmV?d00001
+
+diff --git a/web/index.html b/web/index.html
+new file mode 100644
+index 0000000..adf030f
+--- /dev/null
++++ b/web/index.html
+@@ -0,0 +1,536 @@
++<!doctype html>
++<!-- Browser front end for Cranked (WebAssembly). Serve this folder over HTTP with cranked.js and cranked.wasm. -->
++<html lang="en">
++<head>
++<meta charset="utf-8">
++<meta name="viewport" content="width=device-width, initial-scale=1">
++<meta name="theme-color" content="#1f1d1a">
++<link rel="manifest" href="manifest.webmanifest">
++<link rel="icon" href="icon-192.png">
++<title>Cranked</title>
++<style>
++  :root {
++    --bg: #f4f2ec; --fg: #1f1d1a; --muted: #6b665d; --line: #d9d4c8; --panel: #fffdf8; --accent: #b8860b;
++  }
++  @media (prefers-color-scheme: dark) {
++    :root { --bg: #171614; --fg: #ebe7de; --muted: #9b958a; --line: #34312c; --panel: #201f1c; --accent: #e0b040; }
++  }
++  * { box-sizing: border-box; }
++  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, sans-serif; }
++  main { max-width: 860px; margin: 0 auto; padding: 20px 16px 48px; }
++  header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
++  h1 { font-size: 20px; margin: 0; letter-spacing: .02em; }
++  h2 { font-size: 15px; margin: 24px 0 8px; }
++  .sub { margin: 0; color: var(--muted); font-size: 14px; }
++  .screen { background: #000; border-radius: 10px; padding: 12px; display: flex; justify-content: center; align-items: center; position: relative; }
++  .screen:fullscreen { border-radius: 0; padding: 0; }
++  canvas { width: 100%; max-width: 800px; aspect-ratio: 5 / 3; image-rendering: pixelated; background: #b1aea7; display: block; }
++  .screen:fullscreen canvas { max-width: none; width: min(100vw, calc(100vh * 5 / 3)); }
++  .paused::after { content: "Paused"; position: absolute; inset: auto 0 18px; text-align: center; color: #fff; font-weight: 600; letter-spacing: .05em; text-shadow: 0 1px 3px #000; }
++  .bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 12px 0; }
++  label.btn, a.btn, button { border: 1px solid var(--line); background: var(--panel); color: var(--fg); border-radius: 8px;
++    padding: 7px 12px; font: inherit; cursor: pointer; text-decoration: none; }
++  label.btn:hover, a.btn:hover, button:hover { border-color: var(--accent); }
++  button:disabled { opacity: .5; cursor: default; }
++  input[type=file] { display: none; }
++  #status { color: var(--muted); margin-left: auto; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
++  .drop { outline: 2px dashed var(--accent); outline-offset: 4px; }
++  .library { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line); }
++  .library li { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); }
++  .library .title { font-weight: 600; }
++  .library .meta { color: var(--muted); font-size: 13px; }
++  .library .grow { flex: 1; min-width: 0; overflow-wrap: anywhere; }
++  .empty { color: var(--muted); font-size: 14px; }
++  details { margin-top: 20px; }
++  summary { cursor: pointer; font-weight: 600; }
++  table { border-collapse: collapse; margin-top: 8px; }
++  td { padding: 3px 14px 3px 0; vertical-align: top; }
++  td:first-child { color: var(--muted); white-space: nowrap; }
++  .touch { display: none; justify-content: space-between; align-items: center; gap: 12px; margin-top: 14px; user-select: none; touch-action: none; }
++  @media (pointer: coarse) { .touch { display: flex; } }
++  .touch.on { display: flex; }
++  .dpad { display: grid; grid-template-columns: repeat(3, 46px); grid-template-rows: repeat(3, 46px); flex: none; gap: 4px; }
++  .pad { border: 1px solid var(--line); background: var(--panel); color: var(--fg); border-radius: 10px; font: 600 16px system-ui; touch-action: none; padding: 0; }
++  .pad.down { background: var(--accent); color: #000; }
++  .ab { display: flex; gap: 10px; align-items: center; flex: none; }
++  .ab .pad { width: 56px; height: 56px; border-radius: 50%; }
++  .crank { flex: none; width: 80px; height: 80px; border-radius: 50%; border: 1px solid var(--line); background: var(--panel); position: relative; touch-action: none; }
++  .crank::after { content: ""; position: absolute; left: 50%; top: 6px; width: 4px; height: 34px; margin-left: -2px; background: var(--accent); border-radius: 2px; transform-origin: 2px 34px; transform: rotate(var(--angle, 0deg)); }
++  /* a phone: the pads shrink so the row fits (and again below 350 px, for 320 px screens) */
++  @media (max-width: 420px) {
++    .touch { gap: 6px; }
++    .dpad { grid-template-columns: repeat(3, 38px); grid-template-rows: repeat(3, 38px); gap: 3px; }
++    .ab { gap: 6px; } .ab .pad { width: 48px; height: 48px; }
++    .crank { width: 66px; height: 66px; }
++    .crank::after { height: 26px; transform-origin: 2px 26px; }
++  }
++  @media (max-width: 350px) {
++    .dpad { grid-template-columns: repeat(3, 34px); grid-template-rows: repeat(3, 34px); }
++    .ab .pad { width: 44px; height: 44px; }
++    .crank { width: 58px; height: 58px; }
++    .crank::after { height: 22px; transform-origin: 2px 22px; }
++  }
++  .library .src { color: var(--muted); font-size: 12px; }
++  .library a { color: inherit; }
++  .kiosk .site-only { display: none !important; }
++  footer { margin-top: 28px; color: var(--muted); font-size: 12px; }
++  footer a { color: inherit; }
++  kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; font: 13px ui-monospace, monospace; background: var(--panel); }
++</style>
++</head>
++<body>
++<main>
++  <header>
++    <h1 id="siteTitle">Cranked</h1>
++    <p class="sub" id="siteSub">Playdate games in the browser: Lua games, and C games on a built-in ARM interpreter.</p>
++  </header>
++  <div class="screen" id="screen"><canvas id="lcd" width="400" height="240"></canvas></div>
++  <div class="touch" id="touch">
++    <div class="dpad">
++      <span></span><button class="pad" data-bit="4" aria-label="Up">&uarr;</button><span></span>
++      <button class="pad" data-bit="1" aria-label="Left">&larr;</button><button class="pad" data-bit="128" aria-label="Menu">&#9776;</button><button class="pad" data-bit="2" aria-label="Right">&rarr;</button>
++      <span></span><button class="pad" data-bit="8" aria-label="Down">&darr;</button><span></span>
++    </div>
++    <div class="crank" id="crankdial" aria-label="Crank"></div>
++    <div class="ab"><button class="pad" data-bit="16">B</button><button class="pad" data-bit="32">A</button></div>
++  </div>
++  <div class="bar">
++    <label class="btn site-only">Open zipped game<input type="file" id="zipfile" accept=".zip"></label>
++    <label class="btn site-only">Open .pdx folder<input type="file" id="folder" webkitdirectory></label>
++    <button id="pause" type="button" disabled>Pause</button>
++    <button id="full" type="button">Fullscreen</button>
++    <button id="shot" type="button" disabled>Screenshot</button>
++    <button id="mute" type="button">Sound on</button>
++    <button id="exportSaves" type="button" disabled>Export saves</button>
++    <label class="btn" id="importLabel">Import saves<input type="file" id="importSaves" accept=".zip"></label>
++    <span id="status">Loading engine...</span>
++  </div>
++
++  <div class="site-only" id="catalogSection" hidden>
++    <h2 id="catalogTitle">Games</h2>
++    <ul class="library" id="catalog"></ul>
++  </div>
++  <div class="site-only">
++    <h2>Library</h2>
++    <ul class="library" id="library"></ul>
++    <p class="empty" id="empty">Games you open are kept here, in this browser, to play again without picking the file.</p>
++  </div>
++
++  <details>
++    <summary>Controls</summary>
++    <table>
++      <tr><td>D-pad</td><td><kbd>&larr;</kbd> <kbd>&uarr;</kbd> <kbd>&rarr;</kbd> <kbd>&darr;</kbd></td></tr>
++      <tr><td>A, B</td><td><kbd>X</kbd> and <kbd>Z</kbd></td></tr>
++      <tr><td>Menu</td><td><kbd>Enter</kbd> or <kbd>Esc</kbd></td></tr>
++      <tr><td>Crank</td><td>mouse wheel over the screen, or <kbd>,</kbd> and <kbd>.</kbd>; <kbd>C</kbd> docks and undocks it</td></tr>
++      <tr><td>Pause</td><td><kbd>P</kbd></td></tr>
++      <tr><td>Gamepad</td><td>d-pad or left stick; right and bottom buttons for A and B; Start or Back for the menu; right stick or shoulder buttons for the crank</td></tr>
++      <tr><td>Touch</td><td>the buttons under the screen; drag round the dial to turn the crank</td></tr>
++      <tr><td>Saves</td><td>kept in this browser (IndexedDB); Export saves and Import saves move them between browsers</td></tr>
++    </table>
++  </details>
++  <footer>
++    Playdate fonts by Panic Inc., licensed under <a href="https://creativecommons.org/licenses/by/4.0/" rel="license noopener" target="_blank">CC BY 4.0</a>.
++    Playdate is a trademark of Panic Inc. This project is not affiliated with Panic.
++  </footer>
++</main>
++<script src="zip.js"></script>
++<script>
++"use strict";
++// The engine (engine.js) runs on this page's thread by default, or in a worker with ?worker=1 (worker.js);
++// this page handles input, drawing, audio output, the library and the buttons. Hosting needs only static files either
++// way.
++const BUTTONS = { ArrowLeft: 1, ArrowRight: 2, ArrowUp: 4, ArrowDown: 8, KeyZ: 16, KeyX: 32, Enter: 128, Escape: 128 };
++const RATE = 44100;
++const $ = id => document.getElementById(id);
++const status = $("status"), screen = $("screen");
++const ctx2d = $("lcd").getContext("2d");
++let ready = false, running = false, paused = false, buttons = 0, crank = 0, docked = true;
++let currentFolder = "", currentEntry = null;
++let audio = null, audioNode = null, muted = false, currentTitle = "", pendingEntry = null, frameMs = 0, latest = null;
++
++function setStatus(text) { status.textContent = text; }
++function store(key, value) { try { localStorage.setItem(key, value); } catch (e) {} }
++function load(key) { try { return localStorage.getItem(key); } catch (e) { return null; } }
++
++const useWorker = new URLSearchParams(location.search).has("worker") && typeof Worker !== "undefined";
++const worker = useWorker ? new Worker("worker.js") : { postMessage() {}, onmessage: null, onerror: null };
++if (!useWorker) { // the same messages, on this thread: load the engine's scripts, then connect them
++  const handler = { pending: [], run: null };
++  worker.postMessage = msg => { if (handler.run) handler.run({ data: msg }); else handler.pending.push(msg); };
++  const load = src => new Promise((resolve, reject) => { const el = document.createElement("script"); el.src = src; el.onload = resolve; el.onerror = () => reject(new Error("could not load " + src)); document.head.append(el); });
++  load("cranked.js").then(() => load("engine.js")).then(() => {
++    handler.run = createCrankedEngine(msg => worker.onmessage && worker.onmessage({ data: msg }), false);
++    for (const msg of handler.pending.splice(0)) handler.run({ data: msg });
++  }).catch(e => worker.onerror && worker.onerror(e));
++}
++worker.onmessage = e => {
++  const msg = e.data;
++  if (msg.type === "ready") { ready = true; setStatus(site.game ? "Starting..." : "Open a game, or pick one from the library"); connectAudio(); siteReady(); }
++  else if (msg.type === "loaded") {
++    if (!msg.ok) { setStatus(msg.error); running = false; updateButtons(); return; }
++    currentFolder = (msg.info && msg.info.dataFolder) || "";
++    running = true; paused = false; docked = true; crank = 0; screen.classList.remove("paused"); updateButtons();
++    setStatus("Running (loaded in " + Math.round(msg.loadMs) + " ms)");
++    if (pendingEntry) remember(pendingEntry, msg.info);
++  } else if (msg.type === "saves") savesExported(msg);
++  else if (msg.type === "imported") savesImported(msg);
++  else if (msg.type === "frame") { latest = msg.rgba; frameMs = msg.frameMs; }
++  else if (msg.type === "stopped") { setStatus(msg.error); running = false; updateButtons(); }
++};
++worker.onerror = e => setStatus("The engine could not start: " + (e.message || "worker error"));
++
++function sendInput() { worker.postMessage({ type: "input", input: { buttons: buttons | touchBits | padBits, crank, docked } }); }
++
++// ---------- the library: games kept in IndexedDB as a zip's bytes or a folder's files ----------
++const DB = new Promise((resolve, reject) => {
++  const req = indexedDB.open("cranked-library", 1);
++  req.onupgradeneeded = () => req.result.createObjectStore("games", { keyPath: "id" });
++  req.onsuccess = () => resolve(req.result);
++  req.onerror = () => reject(req.error);
++});
++async function dbDo(mode, fn) {
++  const db = await DB;
++  return new Promise((resolve, reject) => {
++    const tx = db.transaction("games", mode); const r = fn(tx.objectStore("games"));
++    tx.oncomplete = () => resolve(r && r.result); tx.onerror = () => reject(tx.error);
++  });
++}
++async function renderLibrary() {
++  let games = [];
++  try { games = await dbDo("readonly", s => s.getAll()); } catch (e) {}
++  games.sort((a, b) => b.played - a.played);
++  const list = $("library"); list.textContent = "";
++  $("empty").style.display = games.length ? "none" : "";
++  for (const g of games) {
++    const li = document.createElement("li");
++    const text = document.createElement("div"); text.className = "grow";
++    const t = document.createElement("div"); t.className = "title"; t.textContent = g.title;
++    const m = document.createElement("div"); m.className = "meta";
++    m.textContent = [g.author, (g.size / 1048576).toFixed(1) + " MB"].filter(Boolean).join(" \u00b7 ");
++    text.append(t, m);
++    const play = document.createElement("button"); play.textContent = "Play"; play.onclick = () => startGame(g);
++    const del = document.createElement("button"); del.textContent = "Remove";
++    del.onclick = async () => { await dbDo("readwrite", s => s.delete(g.id)); renderLibrary(); };
++    li.append(text, play, del); list.append(li);
++  }
++}
++async function remember(entry, info) {
++  const id = (info && info.bundleID) || entry.id || entry.fileName;
++  const title = (info && info.name) || entry.title || entry.fileName;
++  const author = (info && info.author) || entry.author || "";
++  currentTitle = title;
++  try { await dbDo("readwrite", s => s.put({ ...entry, id, title, author, played: Date.now() })); } catch (e) { console.warn("library", e); }
++  renderLibrary();
++}
++
++// ---------- loading: the game's bytes go to the worker (copied, so the library keeps its own) ----------
++function startGame(entry) {
++  if (!ready) return;
++  pendingEntry = entry; currentEntry = entry; setStatus("Loading...");
++  if (entry.kind === "zip") worker.postMessage({ type: "load", kind: "zip", zip: entry.zip });
++  else worker.postMessage({ type: "load", kind: "files", files: entry.files });
++}
++async function openZip(file) {
++  const data = new Uint8Array(await file.arrayBuffer());
++  startGame({ kind: "zip", fileName: file.name.replace(/\.zip$/i, ""), zip: data, size: data.length });
++}
++$("zipfile").addEventListener("change", e => { const f = e.target.files[0]; if (f) openZip(f); e.target.value = ""; });
++$("folder").addEventListener("change", async e => {
++  const picked = [...e.target.files]; e.target.value = ""; if (!picked.length) return;
++  const files = []; let size = 0;
++  for (const f of picked) {
++    const data = new Uint8Array(await f.arrayBuffer()); size += data.length;
++    files.push({ path: f.webkitRelativePath.split("/").slice(1).join("/"), data }); // without the folder's own name
++  }
++  const fileName = picked[0].webkitRelativePath.split("/")[0].replace(/\.pdx$/i, "");
++  startGame({ kind: "files", fileName, files, size });
++});
++screen.addEventListener("dragover", e => { e.preventDefault(); screen.classList.add("drop"); });
++screen.addEventListener("dragleave", () => screen.classList.remove("drop"));
++screen.addEventListener("drop", e => {
++  e.preventDefault(); screen.classList.remove("drop");
++  const f = e.dataTransfer.files[0]; if (f) openZip(f);
++});
++renderLibrary();
++
++// ---------- the site: one game (kiosk) or a catalog of games to download ----------
++// site.json next to the page (optional): { "title", "subtitle", "game": url of a zipped game (one game, no library),
++// "catalog": url of a game list (default games.json), "proxy": a download proxy's address, to which a game's
++// address is appended, encoded (see packaging/download-proxy) }. The URL can set ?game=<url> and ?catalog=<url> too.
++// The game list: { "title": "Games", "games": [{ "title", "author", "url", "version", "license", "source",
++// "description", "download", "page" }] }; a downloaded game is kept in the library and downloaded again only when its
++// version changes. "url" is a game the site hosts. A game hosted elsewhere has "download" (its own address, tried
++// directly and then through the proxy, since most hosts do not allow downloads from other sites) and/or "page" (the
++// author's page, to get it from by hand and open here).
++const params = new URLSearchParams(location.search);
++const site = { title: "", subtitle: "", game: "", catalog: "games.json", proxy: "" };
++const siteLoaded = fetch("site.json", { cache: "no-cache" }).then(r => r.ok ? r.json() : {}).catch(() => ({})).then(cfg => {
++  for (const k of Object.keys(site)) if (typeof cfg[k] === "string") site[k] = cfg[k];
++  if (params.get("game")) site.game = params.get("game");
++  if (params.get("catalog")) site.catalog = params.get("catalog");
++  if (site.title) { $("siteTitle").textContent = site.title; document.title = site.title; }
++  if (site.subtitle) $("siteSub").textContent = site.subtitle;
++  if (site.game) document.body.classList.add("kiosk");
++  else renderCatalog();
++});
++function webUrl(url) { // a relative or http(s) address, as an absolute one; anything else is refused
++  try { const u = new URL(url, location.href); return u.protocol === "http:" || u.protocol === "https:" ? u.href : null; }
++  catch (e) { return null; }
++}
++async function siteReady() {
++  await siteLoaded;
++  if (site.game) playUrl(site.game, { title: site.title });
++}
++async function fetchGame(url, label) {
++  const r = await fetch(url);
++  if (!r.ok) throw new Error(r.status + " " + r.statusText);
++  const total = +r.headers.get("content-length") || 0;
++  if (!r.body || !total) return new Uint8Array(await r.arrayBuffer());
++  const reader = r.body.getReader(), chunks = []; let got = 0;
++  for (;;) {
++    const { done, value } = await reader.read(); if (done) break;
++    chunks.push(value); got += value.length;
++    setStatus(label + " " + Math.min(100, Math.round(got * 100 / total)) + "%");
++  }
++  const out = new Uint8Array(got); let at = 0;
++  for (const c of chunks) { out.set(c, at); at += c.length; }
++  return out;
++}
++async function cachedGame(url, version) {
++  try { return (await dbDo("readonly", s => s.getAll())).find(g => g.source === url && (g.version || "") === (version || "")); }
++  catch (e) { return null; }
++}
++async function playUrl(url, meta, viaProxy) {
++  const abs = webUrl(url);
++  if (!abs) { setStatus("Not a web address: " + url); return; }
++  const cached = await cachedGame(abs, meta.version);
++  if (cached) { startGame(cached); return; }
++  try {
++    const label = "Downloading " + (meta.title || "the game");
++    let zip;
++    try { zip = await fetchGame(abs, label); }
++    catch (e) { // a host that does not allow downloads from other sites fails here (the browser hides why)
++      const proxy = viaProxy && site.proxy && webUrl(site.proxy);
++      if (!proxy) throw new Error(meta.page ? "its host does not allow it from here; get it from the author's page and open it here" : e.message);
++      zip = await fetchGame(proxy + encodeURIComponent(abs), label);
++    }
++    startGame({ kind: "zip", fileName: meta.title || decodeURIComponent(abs.split("/").pop()).replace(/\.zip$/i, ""), title: meta.title,
++                author: meta.author, zip, size: zip.length, source: abs, version: meta.version || "", license: meta.license || "" });
++  } catch (e) { setStatus("Could not download the game: " + e.message); }
++}
++async function renderCatalog() {
++  let list;
++  try {
++    const url = webUrl(site.catalog); if (!url) return;
++    const r = await fetch(url, { cache: "no-cache" }); if (!r.ok) return;
++    list = await r.json();
++  } catch (e) { return; }
++  const games = Array.isArray(list.games) ? list.games.filter(g => g && [g.url, g.download, g.page].some(u => typeof u === "string")) : [];
++  if (!games.length) return;
++  if (typeof list.title === "string") $("catalogTitle").textContent = list.title;
++  const ul = $("catalog"); ul.textContent = "";
++  for (const g of games) {
++    const li = document.createElement("li");
++    const text = document.createElement("div"); text.className = "grow";
++    const t = document.createElement("div"); t.className = "title"; t.textContent = g.title || g.url || g.download || g.page;
++    const m = document.createElement("div"); m.className = "meta";
++    m.textContent = [g.author, g.license].filter(x => typeof x === "string" && x).join(" \u00b7 ");
++    text.append(t, m);
++    if (typeof g.description === "string" && g.description) { const d = document.createElement("div"); d.className = "meta"; d.textContent = g.description; text.append(d); }
++    const src = webUrl(g.source || "");
++    if (src) { const a = document.createElement("a"); a.className = "src"; a.href = src; a.target = "_blank"; a.rel = "noopener"; a.textContent = "Source and license"; text.append(a); }
++    li.append(text);
++    const page = webUrl(typeof g.page === "string" ? g.page : "");
++    if (typeof g.url === "string" || typeof g.download === "string") {
++      const play = document.createElement("button"); play.textContent = "Play";
++      play.onclick = () => typeof g.url === "string" ? playUrl(g.url, g) : playUrl(g.download, g, true);
++      li.append(play);
++    } else if (page) { // only the author's page: the game is downloaded there and opened here
++      const a = document.createElement("a"); a.className = "btn"; a.href = page; a.target = "_blank"; a.rel = "noopener";
++      a.textContent = "Get it"; a.title = "Download it from the author's page, then open or drop the file here"; li.append(a);
++    }
++    ul.append(li);
++  }
++  $("catalogSection").hidden = false;
++}
++
++// ---------- save data: exported as a zip of the game's data folder, and imported from one ----------
++$("exportSaves").onclick = () => { if (currentFolder) worker.postMessage({ type: "exportSaves", folder: currentFolder }); };
++function savesExported(msg) {
++  if (!msg.files.length) { setStatus("This game has no save data yet"); return; }
++  const blob = new Blob([CrankedZip.write(msg.files)], { type: "application/zip" });
++  const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
++  a.download = msg.folder.replace(/[^\w.-]+/g, "_") + "-saves-" + new Date().toISOString().slice(0, 10) + ".zip";
++  a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
++  setStatus("Exported " + msg.files.length + " file" + (msg.files.length === 1 ? "" : "s"));
++}
++$("importSaves").addEventListener("change", async e => {
++  const f = e.target.files[0]; e.target.value = "";
++  if (!f || !currentEntry || !currentFolder) return;
++  if (!confirm("Replace this game's save data with " + f.name + "? The game starts again.")) return;
++  let files;
++  try { files = await CrankedZip.read(new Uint8Array(await f.arrayBuffer())); }
++  catch (err) { setStatus("Could not read " + f.name + ": " + err.message); return; }
++  const prefix = currentFolder + "/"; // a zip of the folder itself is accepted too
++  if (files.length && files.every(x => x.path.startsWith(prefix))) files = files.map(x => ({ path: x.path.slice(prefix.length), data: x.data }));
++  running = false; updateButtons(); setStatus("Importing...");
++  worker.postMessage({ type: "importSaves", folder: currentFolder, files });
++});
++function savesImported(msg) {
++  if (!msg.ok) { setStatus("Import failed: " + msg.error); return; }
++  if (currentEntry) startGame(currentEntry);
++}
++
++// ---------- buttons: pause, fullscreen, screenshot, sound ----------
++function updateButtons() {
++  $("pause").disabled = !running; $("shot").disabled = !running; $("exportSaves").disabled = !running || !currentFolder;
++  $("importLabel").style.display = running && currentFolder ? "" : "none";
++  $("pause").textContent = paused ? "Resume" : "Pause";
++}
++function setPaused(on) {
++  if (!running || paused === on) return;
++  paused = on; screen.classList.toggle("paused", paused); updateButtons();
++  worker.postMessage({ type: paused ? "pause" : "resume" });
++}
++$("pause").onclick = () => setPaused(!paused);
++let hiddenPause = false; // a hidden tab pauses the game, and showing it again resumes it unless it was paused by hand
++document.addEventListener("visibilitychange", () => {
++  if (document.hidden && running && !paused) { hiddenPause = true; setPaused(true); }
++  else if (!document.hidden && hiddenPause) { hiddenPause = false; setPaused(false); }
++});
++$("full").onclick = () => { if (document.fullscreenElement) document.exitFullscreen(); else screen.requestFullscreen().catch(() => {}); };
++$("shot").onclick = () => {
++  const c = document.createElement("canvas"); c.width = 800; c.height = 480;
++  const g = c.getContext("2d"); g.imageSmoothingEnabled = false; g.drawImage($("lcd"), 0, 0, 800, 480);
++  c.toBlob(blob => {
++    const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
++    a.download = (currentTitle || "cranked").replace(/[^\w-]+/g, "_") + "-" + new Date().toISOString().replace(/[:.]/g, "-") + ".png";
++    a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
++  });
++};
++muted = load("cranked.muted") === "1";
++$("mute").textContent = muted ? "Sound off" : "Sound on";
++$("mute").onclick = e => {
++  muted = !muted; e.target.textContent = muted ? "Sound off" : "Sound on"; store("cranked.muted", muted ? "1" : "0");
++  if (audio) { if (muted) audio.suspend(); else audio.resume(); }
++  ensureAudio();
++};
++
++// ---------- audio: an AudioWorklet fed by the worker over its own channel ----------
++async function connectAudio() {
++  if (audio || typeof AudioContext === "undefined") return;
++  audio = new AudioContext({ sampleRate: RATE });
++  const channel = new MessageChannel();
++  let worklet = false;
++  if (audio.audioWorklet) { // only in secure contexts (https, localhost)
++    try {
++      await audio.audioWorklet.addModule("audio-worklet.js");
++      audioNode = new AudioWorkletNode(audio, "cranked-audio", { outputChannelCount: [2] });
++      audioNode.connect(audio.destination);
++      audioNode.port.postMessage({ port: channel.port1 }, [channel.port1]);
++      worklet = true;
++    } catch (e) { console.warn("audio worklet", e); }
++  }
++  if (!worklet) { // the chunks played as scheduled buffers on this thread
++    let at = 0;
++    channel.port1.onmessage = m => {
++      const samples = m.data, frames = samples.length / 2;
++      const buffer = audio.createBuffer(2, frames, RATE);
++      const left = buffer.getChannelData(0), right = buffer.getChannelData(1);
++      for (let i = 0; i < frames; i++) { left[i] = samples[2 * i] / 32768; right[i] = samples[2 * i + 1] / 32768; }
++      const now = audio.currentTime;
++      if (at < now + 0.02 || at > now + 0.3) at = now + 0.05; // restart after an underrun or a stall
++      const source = audio.createBufferSource(); source.buffer = buffer; source.connect(audio.destination);
++      source.start(at); at += frames / RATE;
++    };
++  }
++  worker.postMessage({ type: "audioPort", port: channel.port2 }, [channel.port2]);
++  if (muted) audio.suspend();
++}
++function ensureAudio() { // browsers start audio only after a user gesture
++  if (audio && !muted && audio.state === "suspended") audio.resume().catch(() => {});
++}
++
++// ---------- input ----------
++function turn(degrees) { crank = ((crank + degrees) % 360 + 360) % 360; docked = false; sendInput(); }
++addEventListener("keydown", e => {
++  if (e.target instanceof HTMLInputElement) return;
++  if (e.code in BUTTONS) { buttons |= BUTTONS[e.code]; e.preventDefault(); sendInput(); }
++  else if (e.code === "Comma") turn(-10);
++  else if (e.code === "Period") turn(10);
++  else if (e.code === "KeyC") { docked = !docked; sendInput(); }
++  else if (e.code === "KeyP" && !e.repeat) setPaused(!paused);
++  ensureAudio();
++});
++addEventListener("keyup", e => { if (e.code in BUTTONS) { buttons &= ~BUTTONS[e.code]; sendInput(); } });
++addEventListener("blur", () => { buttons = 0; sendInput(); });
++screen.addEventListener("wheel", e => { e.preventDefault(); turn(e.deltaY / 4); }, { passive: false });
++screen.addEventListener("pointerdown", ensureAudio);
++
++// Touch controls (shown on touch screens): held buttons set their bits; dragging round the dial turns the crank
++let touchBits = 0;
++if (navigator.maxTouchPoints > 0) $("touch").classList.add("on");
++for (const el of document.querySelectorAll(".pad[data-bit]")) {
++  const bit = +el.dataset.bit;
++  const press = e => { e.preventDefault(); el.setPointerCapture(e.pointerId); touchBits |= bit; el.classList.add("down"); ensureAudio(); sendInput(); };
++  const release = () => { touchBits &= ~bit; el.classList.remove("down"); sendInput(); };
++  el.addEventListener("pointerdown", press);
++  for (const t of ["pointerup", "pointercancel", "lostpointercapture"]) el.addEventListener(t, release);
++}
++const dial = $("crankdial");
++function dialAngle(e) {
++  const r = dial.getBoundingClientRect();
++  return Math.atan2(e.clientX - (r.left + r.width / 2), -(e.clientY - (r.top + r.height / 2))) * 180 / Math.PI;
++}
++let dialLast = null;
++dial.addEventListener("pointerdown", e => { e.preventDefault(); dial.setPointerCapture(e.pointerId); dialLast = dialAngle(e); ensureAudio(); });
++dial.addEventListener("pointermove", e => {
++  if (dialLast === null) return;
++  const a = dialAngle(e); let d = a - dialLast; dialLast = a;
++  if (d > 180) d -= 360; if (d < -180) d += 360;
++  turn(d);
++});
++for (const t of ["pointerup", "pointercancel"]) dial.addEventListener(t, () => { dialLast = null; });
++
++// Gamepads (standard mapping), as the libretro core maps a RetroPad: the d-pad or left stick; the right face button
++// is A, the bottom one B; Start or Back the menu; the right stick points the crank and the shoulder buttons turn it
++let padBits = 0;
++function pollPads() {
++  let bits = 0, moved = false;
++  for (const pad of navigator.getGamepads ? navigator.getGamepads() : []) {
++    if (!pad || pad.mapping !== "standard") continue;
++    const on = i => pad.buttons[i] && pad.buttons[i].pressed;
++    const lx = pad.axes[0] || 0, ly = pad.axes[1] || 0; // the left stick works as the d-pad too
++    if (on(14) || lx < -0.5) bits |= 1; if (on(15) || lx > 0.5) bits |= 2; if (on(12) || ly < -0.5) bits |= 4; if (on(13) || ly > 0.5) bits |= 8;
++    if (on(0)) bits |= 16; if (on(1)) bits |= 32; if (on(9) || on(8)) bits |= 128;
++    const x = pad.axes[2] || 0, y = pad.axes[3] || 0;
++    if (x * x + y * y > 0.25) { crank = ((Math.atan2(x, -y) * 180 / Math.PI) + 360) % 360; docked = false; moved = true; }
++    if (on(4)) { crank = ((crank - 6) % 360 + 360) % 360; docked = false; moved = true; }
++    if (on(5)) { crank = (crank + 6) % 360; docked = false; moved = true; }
++  }
++  if (bits !== padBits || moved) { padBits = bits; sendInput(); }
++  if (bits) ensureAudio();
++}
++
++// ---------- drawing: the newest frame from the worker, once per animation frame ----------
++let image = null, shownAt = 0;
++function draw(time) {
++  pollPads();
++  if (latest) {
++    const data = new Uint8ClampedArray(latest); latest = null;
++    if (!image) image = new ImageData(400, 240);
++    image.data.set(data); ctx2d.putImageData(image, 0, 0);
++  }
++  dial.style.setProperty("--angle", crank + "deg");
++  if (running && !paused && time - shownAt > 500) { shownAt = time; setStatus("Running \u00b7 " + frameMs.toFixed(2) + " ms per step"); }
++  requestAnimationFrame(draw);
++}
++requestAnimationFrame(draw);
++
++// Installable and usable offline (a service worker needs https or localhost)
++if ("serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost" || location.hostname === "127.0.0.1"))
++  navigator.serviceWorker.register("sw.js").catch(e => console.warn("service worker", e));
++</script>
++</body>
++</html>
+diff --git a/web/main.cpp b/web/main.cpp
+new file mode 100644
+index 0000000..f8fdee9
+--- /dev/null
++++ b/web/main.cpp
+@@ -0,0 +1,102 @@
++// Browser front end (WebAssembly, Emscripten). The page drives it: it writes the game into the in-memory
++// file system, calls web_load, then web_frame once per animation frame with the input and the elapsed time, and draws
++// the returned RGBA frame; web_audio fills the audio queue. The game's clock is virtual and advanced by the page, so a
++// hidden tab (no animation frames) pauses the game instead of making it jump ahead.
++#include "Cranked.hpp"
++
++#include <emscripten/emscripten.h>
++#include <cstdio>
++#include <string>
++
++using namespace cranked;
++
++static Cranked *instance;
++static bool failed;
++static std::string lastError; // shown by the page
++
++template<typename F>
++static bool guarded(const char *what, F &&f) {
++    try {
++        f();
++        return true;
++    } catch (std::exception &e) {
++        std::fprintf(stderr, "Cranked: %s failed: %s\n", what, e.what());
++        lastError = std::string(what) + " failed: " + e.what();
++    } catch (...) {
++        lastError = std::string(what) + " failed";
++        std::fprintf(stderr, "Cranked: %s failed\n", what);
++    }
++    failed = true;
++    return false;
++}
++
++extern "C" {
++
++// Loads and starts the game at path (a .pdx folder or a zipped one); 1 on success
++EMSCRIPTEN_KEEPALIVE int web_load(const char *path) {
++    if (instance) {
++        guarded("unloading the game", [] { instance->unload(); });
++        delete instance;
++    }
++    instance = new Cranked;
++    instance->useVirtualClock();
++    instance->crankDocked = true;
++    failed = false;
++    return guarded("loading the game", [&] {
++        instance->load(path);
++        instance->start();
++    });
++}
++
++// Unloads the game (before its save data is replaced, so a game that saves when it ends cannot overwrite it)
++EMSCRIPTEN_KEEPALIVE void web_unload() {
++    if (instance) {
++        guarded("unloading the game", [] { instance->unload(); });
++        delete instance;
++        instance = nullptr;
++    }
++}
++
++// One step: buttons are PDButtons bits, crank in degrees (0 up, clockwise). Returns the 400x240 frame as RGBA bytes.
++EMSCRIPTEN_KEEPALIVE const uint8_t *web_frame(int buttons, float crank, int docked, int micros) {
++    if (!instance)
++        return nullptr;
++    if (!failed) {
++        instance->currentInputs = buttons;
++        instance->crankAngle = crank;
++        instance->crankDocked = docked != 0;
++        instance->advanceVirtualClock(micros);
++        guarded("update", [] { instance->update(); });
++    }
++    return (const uint8_t *) instance->graphics.displayBufferRGBA;
++}
++
++// Interleaved stereo 16-bit samples at 44.1 kHz (silence once the game has stopped)
++EMSCRIPTEN_KEEPALIVE void web_audio(int16_t *out, int frames) {
++    memset(out, 0, (size_t) frames * 4);
++    if (instance and !failed)
++        guarded("audio", [&] { instance->audio.sampleAudio(out, frames); });
++}
++
++// A pdxinfo field of the loaded game ("name", "author", "bundleID", ...), or an empty string
++EMSCRIPTEN_KEEPALIVE const char *web_info(const char *key) {
++    if (!instance or !instance->rom)
++        return "";
++    if (std::string(key) == "_dataFolder") { // the save data's folder name under /appData (for export and import)
++        static std::string folder;
++        folder = instance->files.getRomDataPath().filename().string();
++        return folder.c_str();
++    }
++    auto value = instance->rom->getManifestString(key);
++    return value ? value : "";
++}
++
++EMSCRIPTEN_KEEPALIVE const char *web_error() {
++    return lastError.c_str();
++}
++
++EMSCRIPTEN_KEEPALIVE int web_failed() {
++    return failed ? 1 : 0;
++}
++
++}
+diff --git a/web/manifest.webmanifest b/web/manifest.webmanifest
+new file mode 100644
+index 0000000..07a9155
+--- /dev/null
++++ b/web/manifest.webmanifest
+@@ -0,0 +1,13 @@
++{
++  "name": "Cranked",
++  "short_name": "Cranked",
++  "description": "Playdate games in the browser",
++  "start_url": ".",
++  "display": "standalone",
++  "background_color": "#171614",
++  "theme_color": "#1f1d1a",
++  "icons": [
++    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
++    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
++  ]
++}
+diff --git a/web/sw.js b/web/sw.js
+new file mode 100644
+index 0000000..cde28cc
+--- /dev/null
++++ b/web/sw.js
+@@ -0,0 +1,11 @@
++// Service worker for the browser front end: the page, the engine and the icons are cached, so the page
++// works offline once loaded. Bump VERSION when any of the files change.
++const VERSION = "cranked-5";
++const FILES = ["./", "index.html", "engine.js", "worker.js", "audio-worklet.js", "zip.js", "cranked.js", "cranked.wasm", "manifest.webmanifest", "icon-192.png", "icon-512.png"];
++self.addEventListener("install", e => e.waitUntil(caches.open(VERSION).then(c => c.addAll(FILES)).then(() => self.skipWaiting())));
++self.addEventListener("activate", e => e.waitUntil(caches.keys().then(keys =>
++  Promise.all(keys.filter(k => k !== VERSION).map(k => caches.delete(k)))).then(() => self.clients.claim())));
++self.addEventListener("fetch", e => {
++  if (e.request.method !== "GET") return;
++  e.respondWith(caches.match(e.request).then(hit => hit || fetch(e.request)));
++});
+diff --git a/web/worker.js b/web/worker.js
+new file mode 100644
+index 0000000..383d40c
+--- /dev/null
++++ b/web/worker.js
+@@ -0,0 +1,4 @@
++// Browser front end, optional worker mode (?worker=1): the engine (engine.js) off the page's thread
++"use strict";
++importScripts("cranked.js", "engine.js");
++onmessage = createCrankedEngine((msg, transfer) => postMessage(msg, transfer), true);
+diff --git a/web/zip.js b/web/zip.js
+new file mode 100644
+index 0000000..c32538e
+--- /dev/null
++++ b/web/zip.js
+@@ -0,0 +1,71 @@
++// Minimal zip support for the browser front end, for exporting and importing save data: writing uses no
++// compression (stored entries); reading accepts stored and deflated entries (deflate through DecompressionStream).
++"use strict";
++const CrankedZip = (() => {
++  const CRC = new Uint32Array(256);
++  for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; CRC[n] = c >>> 0; }
++  function crc32(data) { let c = 0xFFFFFFFF; for (let i = 0; i < data.length; i++) c = CRC[(c ^ data[i]) & 255] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; }
++
++  // files: [{ path, data: Uint8Array }] -> Uint8Array of a zip file
++  function write(files) {
++    const enc = new TextEncoder(), parts = [], central = [];
++    let offset = 0;
++    for (const f of files) {
++      const name = enc.encode(f.path), crc = crc32(f.data), size = f.data.length;
++      const local = new DataView(new ArrayBuffer(30));
++      local.setUint32(0, 0x04034b50, true); local.setUint16(4, 20, true); local.setUint16(6, 0x0800, true); // UTF-8 names
++      local.setUint32(14, crc, true); local.setUint32(18, size, true); local.setUint32(22, size, true);
++      local.setUint16(26, name.length, true);
++      parts.push(new Uint8Array(local.buffer), name, f.data);
++      const c = new DataView(new ArrayBuffer(46));
++      c.setUint32(0, 0x02014b50, true); c.setUint16(4, 20, true); c.setUint16(6, 20, true); c.setUint16(8, 0x0800, true);
++      c.setUint32(16, crc, true); c.setUint32(20, size, true); c.setUint32(24, size, true);
++      c.setUint16(28, name.length, true); c.setUint32(42, offset, true);
++      central.push(new Uint8Array(c.buffer), name);
++      offset += 30 + name.length + size;
++    }
++    let centralSize = 0; for (const p of central) centralSize += p.length;
++    const end = new DataView(new ArrayBuffer(22));
++    end.setUint32(0, 0x06054b50, true); end.setUint16(8, files.length, true); end.setUint16(10, files.length, true);
++    end.setUint32(12, centralSize, true); end.setUint32(16, offset, true);
++    const all = [...parts, ...central, new Uint8Array(end.buffer)];
++    const out = new Uint8Array(offset + centralSize + 22); let at = 0;
++    for (const p of all) { out.set(p, at); at += p.length; }
++    return out;
++  }
++
++  async function inflate(data) {
++    const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
++    return new Uint8Array(await new Response(stream).arrayBuffer());
++  }
++
++  // Uint8Array of a zip file -> [{ path, data }] (folders left out); throws on anything it cannot read
++  async function read(bytes) {
++    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength), dec = new TextDecoder();
++    let end = -1;
++    for (let i = bytes.length - 22; i >= Math.max(0, bytes.length - 22 - 65535); i--)
++      if (view.getUint32(i, true) === 0x06054b50) { end = i; break; }
++    if (end < 0) throw new Error("not a zip file");
++    const count = view.getUint16(end + 10, true);
++    let at = view.getUint32(end + 16, true);
++    const files = [];
++    for (let n = 0; n < count; n++) {
++      if (at + 46 > bytes.length || view.getUint32(at, true) !== 0x02014b50) throw new Error("damaged zip file");
++      const method = view.getUint16(at + 10, true), packed = view.getUint32(at + 20, true);
++      const nameLength = view.getUint16(at + 28, true), extra = view.getUint16(at + 30, true), comment = view.getUint16(at + 32, true);
++      const local = view.getUint32(at + 42, true);
++      const path = dec.decode(bytes.subarray(at + 46, at + 46 + nameLength));
++      at += 46 + nameLength + extra + comment;
++      if (path.endsWith("/")) continue;
++      if (local + 30 > bytes.length || view.getUint32(local, true) !== 0x04034b50) throw new Error("damaged zip file");
++      const start = local + 30 + view.getUint16(local + 26, true) + view.getUint16(local + 28, true);
++      const raw = bytes.subarray(start, start + packed);
++      if (method === 0) files.push({ path, data: raw.slice() });
++      else if (method === 8 && typeof DecompressionStream !== "undefined") files.push({ path, data: await inflate(raw) });
++      else throw new Error("unsupported compression in " + path);
++    }
++    return files;
++  }
++  return { write, read, crc32 };
++})();
++if (typeof module !== "undefined") module.exports = CrankedZip;

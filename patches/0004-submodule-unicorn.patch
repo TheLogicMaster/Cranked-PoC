@@ -1,0 +1,459 @@
+diff --git a/qemu/aarch64.h b/qemu/aarch64.h
+index ad096574..08de119a 100644
+--- a/qemu/aarch64.h
++++ b/qemu/aarch64.h
+@@ -788,6 +788,7 @@
+ #define tlb_flush_page_by_mmuidx_all_cpus_synced tlb_flush_page_by_mmuidx_all_cpus_synced_aarch64
+ #define tlb_flush_page_all_cpus_synced tlb_flush_page_all_cpus_synced_aarch64
+ #define tlb_protect_code tlb_protect_code_aarch64
++#define tb_page_has_code tb_page_has_code_aarch64
+ #define tlb_unprotect_code tlb_unprotect_code_aarch64
+ #define tlb_reset_dirty tlb_reset_dirty_aarch64
+ #define tlb_set_dirty tlb_set_dirty_aarch64
+diff --git a/qemu/accel/tcg/cputlb.c b/qemu/accel/tcg/cputlb.c
+index 3d0bebd3..26cd13ac 100644
+--- a/qemu/accel/tcg/cputlb.c
++++ b/qemu/accel/tcg/cputlb.c
+@@ -616,6 +616,14 @@ void tlb_protect_code(struct uc_struct *uc, ram_addr_t ram_addr)
+ {
+     cpu_physical_memory_test_and_clear_dirty(ram_addr, TARGET_PAGE_SIZE,
+                                              DIRTY_MEMORY_CODE);
++    /* Cranked: the page now holds code, so writes to it must take the slow path again (notdirty_write
++       may have let them through while the page held none) */
++    if (uc->cpu) {
++        void *host = qemu_map_ram_ptr(uc, NULL, ram_addr & TARGET_PAGE_MASK);
++        if (host) {
++            tlb_reset_dirty(uc->cpu, (uintptr_t)host, TARGET_PAGE_SIZE);
++        }
++    }
+ }
+ 
+ /* update the TLB so that writes in physical page 'phys_addr' are no longer
+@@ -1186,6 +1194,15 @@ tb_page_addr_t get_page_addr_code(CPUArchState *env, target_ulong addr)
+     return get_page_addr_code_hostp(env, addr, NULL);
+ }
+ 
++/* Cranked: uc_mem_hook_installed without the *_UNMAPPED hooks, which only run when a page is not mapped
++   and so do not depend on a mapped page's TLB entry going through the slow path (Cranked installs them everywhere) */
++static inline bool access_hook_installed(struct uc_struct *uc, hwaddr paddr)
++{
++    return HOOK_EXISTS_BOUNDED(uc, UC_HOOK_MEM_READ, paddr) || HOOK_EXISTS_BOUNDED(uc, UC_HOOK_MEM_READ_PROT, paddr) ||
++           HOOK_EXISTS_BOUNDED(uc, UC_HOOK_MEM_FETCH_PROT, paddr) || HOOK_EXISTS_BOUNDED(uc, UC_HOOK_MEM_READ_AFTER, paddr) ||
++           HOOK_EXISTS_BOUNDED(uc, UC_HOOK_MEM_WRITE, paddr) || HOOK_EXISTS_BOUNDED(uc, UC_HOOK_MEM_WRITE_PROT, paddr);
++}
++
+ static void notdirty_write(CPUState *cpu, vaddr mem_vaddr, unsigned size,
+                            CPUIOTLBEntry *iotlbentry, uintptr_t retaddr,
+                            CPUTLBEntry *tlbe)
+@@ -1208,9 +1225,13 @@ static void notdirty_write(CPUState *cpu, vaddr mem_vaddr, unsigned size,
+     // - have memory hooks installed
+     // - or doing snapshot
+     // , then never clean the tlb
++    /* Cranked: an executable page that holds no translated code is cleaned too. Unicorn has no dirty bitmap, so
++       otherwise every store to RAM the guest may execute (all of an M-profile memory map) would go through this slow
++       path forever, and native game code would run its stores about 20 times slower. tlb_protect_code restores the
++       slow path once a block is translated in the page. */
+     if (!(!mr || (tlbe->addr_write != -1 && mr->priority < cpu->uc->snapshot_level)) &&
+-            !(tlbe->addr_code != -1) &&
+-            !uc_mem_hook_installed(cpu->uc, tlbe->paddr | (mem_vaddr & ~TARGET_PAGE_MASK))) {
++            !(tlbe->addr_code != -1 && tb_page_has_code(cpu->uc, ram_addr)) &&
++            !access_hook_installed(cpu->uc, tlbe->paddr | (mem_vaddr & ~TARGET_PAGE_MASK))) {
+         tlb_set_dirty(cpu, mem_vaddr);
+     }
+ }
+diff --git a/qemu/accel/tcg/translate-all.c b/qemu/accel/tcg/translate-all.c
+index 71b6b2b1..54e91121 100644
+--- a/qemu/accel/tcg/translate-all.c
++++ b/qemu/accel/tcg/translate-all.c
+@@ -424,6 +424,13 @@ static inline PageDesc *page_find(struct uc_struct *uc, tb_page_addr_t index)
+ static void page_lock_pair(struct uc_struct *uc, PageDesc **ret_p1, tb_page_addr_t phys1,
+                            PageDesc **ret_p2, tb_page_addr_t phys2, int alloc);
+ 
++/* Cranked: whether any translated block lies in the RAM page holding addr (see notdirty_write) */
++bool tb_page_has_code(struct uc_struct *uc, tb_page_addr_t addr)
++{
++    PageDesc *p = page_find(uc, addr >> TARGET_PAGE_BITS);
++    return p && p->first_tb;
++}
++
+ #ifdef CONFIG_DEBUG_TCG
+ 
+ static void ht_pages_locked_debug_init(void)
+diff --git a/qemu/arm.h b/qemu/arm.h
+index cd81f540..b381edbc 100644
+--- a/qemu/arm.h
++++ b/qemu/arm.h
+@@ -788,6 +788,7 @@
+ #define tlb_flush_page_by_mmuidx_all_cpus_synced tlb_flush_page_by_mmuidx_all_cpus_synced_arm
+ #define tlb_flush_page_all_cpus_synced tlb_flush_page_all_cpus_synced_arm
+ #define tlb_protect_code tlb_protect_code_arm
++#define tb_page_has_code tb_page_has_code_arm
+ #define tlb_unprotect_code tlb_unprotect_code_arm
+ #define tlb_reset_dirty tlb_reset_dirty_arm
+ #define tlb_set_dirty tlb_set_dirty_arm
+diff --git a/qemu/include/exec/exec-all.h b/qemu/include/exec/exec-all.h
+index 68c65678..fd39ae55 100644
+--- a/qemu/include/exec/exec-all.h
++++ b/qemu/include/exec/exec-all.h
+@@ -464,6 +464,7 @@ tb_page_addr_t get_page_addr_code_hostp(CPUArchState *env, target_ulong addr,
+                                         void **hostp);
+ 
+ void tlb_reset_dirty(CPUState *cpu, ram_addr_t start1, ram_addr_t length);
++bool tb_page_has_code(struct uc_struct *uc, tb_page_addr_t addr); /* Cranked: see translate-all.c */
+ void tlb_reset_dirty_by_vaddr(CPUState *cpu, target_ulong start1, target_ulong length);
+ void tlb_set_dirty(CPUState *cpu, target_ulong vaddr);
+ 
+diff --git a/qemu/include/qemu/crc32c.h b/qemu/include/qemu/crc32c.h
+index 1b537024..5d4648b2 100644
+--- a/qemu/include/qemu/crc32c.h
++++ b/qemu/include/qemu/crc32c.h
+@@ -31,6 +31,7 @@
+ 
+ uint32_t crc32c(uint32_t crc, const uint8_t *data, unsigned int length);
+ 
+-uint32_t crc32(uint32_t crc, const uint8_t *data, unsigned int length);
++/* qemu_crc32, not crc32: zlib, linked into the same program, defines crc32 too */
++uint32_t qemu_crc32(uint32_t crc, const uint8_t *data, unsigned int length);
+ 
+ #endif
+diff --git a/qemu/m68k.h b/qemu/m68k.h
+index 67f94364..b6ebb370 100644
+--- a/qemu/m68k.h
++++ b/qemu/m68k.h
+@@ -1263,6 +1263,7 @@
+ #define tcg_exec_init tcg_exec_init_m68k
+ #define tb_cleanup tb_cleanup_m68k
+ #define tb_flush tb_flush_m68k
++#define tb_page_has_code tb_page_has_code_m68k
+ #define tb_phys_invalidate tb_phys_invalidate_m68k
+ #define tb_gen_code tb_gen_code_m68k
+ #define tb_exec_lock tb_exec_lock_m68k
+diff --git a/qemu/mips.h b/qemu/mips.h
+index 9b0fa37c..a4a38857 100644
+--- a/qemu/mips.h
++++ b/qemu/mips.h
+@@ -1263,6 +1263,7 @@
+ #define tcg_exec_init tcg_exec_init_mips
+ #define tb_cleanup tb_cleanup_mips
+ #define tb_flush tb_flush_mips
++#define tb_page_has_code tb_page_has_code_mips
+ #define tb_phys_invalidate tb_phys_invalidate_mips
+ #define tb_gen_code tb_gen_code_mips
+ #define tb_exec_lock tb_exec_lock_mips
+diff --git a/qemu/mips64.h b/qemu/mips64.h
+index ec030ff2..cb00bece 100644
+--- a/qemu/mips64.h
++++ b/qemu/mips64.h
+@@ -1263,6 +1263,7 @@
+ #define tcg_exec_init tcg_exec_init_mips64
+ #define tb_cleanup tb_cleanup_mips64
+ #define tb_flush tb_flush_mips64
++#define tb_page_has_code tb_page_has_code_mips64
+ #define tb_phys_invalidate tb_phys_invalidate_mips64
+ #define tb_gen_code tb_gen_code_mips64
+ #define tb_exec_lock tb_exec_lock_mips64
+diff --git a/qemu/mips64el.h b/qemu/mips64el.h
+index ea8c9273..249b5cb5 100644
+--- a/qemu/mips64el.h
++++ b/qemu/mips64el.h
+@@ -1263,6 +1263,7 @@
+ #define tcg_exec_init tcg_exec_init_mips64el
+ #define tb_cleanup tb_cleanup_mips64el
+ #define tb_flush tb_flush_mips64el
++#define tb_page_has_code tb_page_has_code_mips64el
+ #define tb_phys_invalidate tb_phys_invalidate_mips64el
+ #define tb_gen_code tb_gen_code_mips64el
+ #define tb_exec_lock tb_exec_lock_mips64el
+diff --git a/qemu/mipsel.h b/qemu/mipsel.h
+index 1b30cbc2..edfc6179 100644
+--- a/qemu/mipsel.h
++++ b/qemu/mipsel.h
+@@ -1263,6 +1263,7 @@
+ #define tcg_exec_init tcg_exec_init_mipsel
+ #define tb_cleanup tb_cleanup_mipsel
+ #define tb_flush tb_flush_mipsel
++#define tb_page_has_code tb_page_has_code_mipsel
+ #define tb_phys_invalidate tb_phys_invalidate_mipsel
+ #define tb_gen_code tb_gen_code_mipsel
+ #define tb_exec_lock tb_exec_lock_mipsel
+diff --git a/qemu/ppc.h b/qemu/ppc.h
+index 9648fd2f..34082e5f 100644
+--- a/qemu/ppc.h
++++ b/qemu/ppc.h
+@@ -1263,6 +1263,7 @@
+ #define tcg_exec_init tcg_exec_init_ppc
+ #define tb_cleanup tb_cleanup_ppc
+ #define tb_flush tb_flush_ppc
++#define tb_page_has_code tb_page_has_code_ppc
+ #define tb_phys_invalidate tb_phys_invalidate_ppc
+ #define tb_gen_code tb_gen_code_ppc
+ #define tb_exec_lock tb_exec_lock_ppc
+diff --git a/qemu/ppc64.h b/qemu/ppc64.h
+index 2d995d5e..4b6398d4 100644
+--- a/qemu/ppc64.h
++++ b/qemu/ppc64.h
+@@ -1263,6 +1263,7 @@
+ #define tcg_exec_init tcg_exec_init_ppc64
+ #define tb_cleanup tb_cleanup_ppc64
+ #define tb_flush tb_flush_ppc64
++#define tb_page_has_code tb_page_has_code_ppc64
+ #define tb_phys_invalidate tb_phys_invalidate_ppc64
+ #define tb_gen_code tb_gen_code_ppc64
+ #define tb_exec_lock tb_exec_lock_ppc64
+diff --git a/qemu/riscv32.h b/qemu/riscv32.h
+index 26c798b4..8d636af1 100644
+--- a/qemu/riscv32.h
++++ b/qemu/riscv32.h
+@@ -1263,6 +1263,7 @@
+ #define tcg_exec_init tcg_exec_init_riscv32
+ #define tb_cleanup tb_cleanup_riscv32
+ #define tb_flush tb_flush_riscv32
++#define tb_page_has_code tb_page_has_code_riscv32
+ #define tb_phys_invalidate tb_phys_invalidate_riscv32
+ #define tb_gen_code tb_gen_code_riscv32
+ #define tb_exec_lock tb_exec_lock_riscv32
+diff --git a/qemu/riscv64.h b/qemu/riscv64.h
+index 8332ce6d..f27fcd21 100644
+--- a/qemu/riscv64.h
++++ b/qemu/riscv64.h
+@@ -1263,6 +1263,7 @@
+ #define tcg_exec_init tcg_exec_init_riscv64
+ #define tb_cleanup tb_cleanup_riscv64
+ #define tb_flush tb_flush_riscv64
++#define tb_page_has_code tb_page_has_code_riscv64
+ #define tb_phys_invalidate tb_phys_invalidate_riscv64
+ #define tb_gen_code tb_gen_code_riscv64
+ #define tb_exec_lock tb_exec_lock_riscv64
+diff --git a/qemu/s390x.h b/qemu/s390x.h
+index 5daa819a..cafed07d 100644
+--- a/qemu/s390x.h
++++ b/qemu/s390x.h
+@@ -1263,6 +1263,7 @@
+ #define tcg_exec_init tcg_exec_init_s390x
+ #define tb_cleanup tb_cleanup_s390x
+ #define tb_flush tb_flush_s390x
++#define tb_page_has_code tb_page_has_code_s390x
+ #define tb_phys_invalidate tb_phys_invalidate_s390x
+ #define tb_gen_code tb_gen_code_s390x
+ #define tb_exec_lock tb_exec_lock_s390x
+diff --git a/qemu/sparc.h b/qemu/sparc.h
+index 5f7c4689..245233b9 100644
+--- a/qemu/sparc.h
++++ b/qemu/sparc.h
+@@ -1263,6 +1263,7 @@
+ #define tcg_exec_init tcg_exec_init_sparc
+ #define tb_cleanup tb_cleanup_sparc
+ #define tb_flush tb_flush_sparc
++#define tb_page_has_code tb_page_has_code_sparc
+ #define tb_phys_invalidate tb_phys_invalidate_sparc
+ #define tb_gen_code tb_gen_code_sparc
+ #define tb_exec_lock tb_exec_lock_sparc
+diff --git a/qemu/sparc64.h b/qemu/sparc64.h
+index 33003493..e60f7985 100644
+--- a/qemu/sparc64.h
++++ b/qemu/sparc64.h
+@@ -1263,6 +1263,7 @@
+ #define tcg_exec_init tcg_exec_init_sparc64
+ #define tb_cleanup tb_cleanup_sparc64
+ #define tb_flush tb_flush_sparc64
++#define tb_page_has_code tb_page_has_code_sparc64
+ #define tb_phys_invalidate tb_phys_invalidate_sparc64
+ #define tb_gen_code tb_gen_code_sparc64
+ #define tb_exec_lock tb_exec_lock_sparc64
+diff --git a/qemu/target/arm/helper-a64.c b/qemu/target/arm/helper-a64.c
+index 12da1140..4140d0e8 100644
+--- a/qemu/target/arm/helper-a64.c
++++ b/qemu/target/arm/helper-a64.c
+@@ -526,7 +526,7 @@ uint64_t HELPER(crc32_64)(uint64_t acc, uint64_t val, uint32_t bytes)
+ 
+     stq_le_p(buf, val);
+ 
+-    return crc32(acc ^ 0xffffffff, buf, bytes) ^ 0xffffffff;
++    return qemu_crc32(acc ^ 0xffffffff, buf, bytes) ^ 0xffffffff;
+ }
+ 
+ uint64_t HELPER(crc32c_64)(uint64_t acc, uint64_t val, uint32_t bytes)
+diff --git a/qemu/target/arm/helper.c b/qemu/target/arm/helper.c
+index 60c9db9e..73f79c23 100644
+--- a/qemu/target/arm/helper.c
++++ b/qemu/target/arm/helper.c
+@@ -11447,7 +11447,7 @@ uint32_t HELPER(crc32)(uint32_t acc, uint32_t val, uint32_t bytes)
+ 
+     stl_le_p(buf, val);
+ 
+-    return crc32(acc ^ 0xffffffff, buf, bytes) ^ 0xffffffff;
++    return qemu_crc32(acc ^ 0xffffffff, buf, bytes) ^ 0xffffffff;
+ }
+ 
+ uint32_t HELPER(crc32c)(uint32_t acc, uint32_t val, uint32_t bytes)
+diff --git a/qemu/target/arm/translate.c b/qemu/target/arm/translate.c
+index 744d8ff7..a995dc24 100644
+--- a/qemu/target/arm/translate.c
++++ b/qemu/target/arm/translate.c
+@@ -279,7 +279,21 @@ static inline void gen_set_cpsr(TCGContext *tcg_ctx, TCGv_i32 var, uint32_t mask
+     tcg_temp_free_i32(tcg_ctx, tmp_mask);
+ }
+ /* Set NZCV flags from the high 4 bits of var.  */
+-#define gen_set_nzcv(var) gen_set_cpsr(tcg_ctx, var, CPSR_NZCV)
++/* Cranked: the four flag globals are set directly, with the values cpsr_write gives them; through the cpsr_write
++ * helper each VMRS APSR_nzcv (every float comparison that branches) would also rebuild the hflags, a quarter of the
++ * run time of float-heavy code */
++static inline void gen_set_nzcv_direct(TCGContext *tcg_ctx, TCGv_i32 var)
++{
++    TCGv_i32 tmp = tcg_temp_new_i32(tcg_ctx);
++    tcg_gen_andi_i32(tcg_ctx, tmp, var, CPSR_Z);
++    tcg_gen_xori_i32(tcg_ctx, tcg_ctx->cpu_ZF, tmp, CPSR_Z);
++    tcg_gen_mov_i32(tcg_ctx, tcg_ctx->cpu_NF, var);
++    tcg_gen_extract_i32(tcg_ctx, tcg_ctx->cpu_CF, var, 29, 1);
++    tcg_gen_shli_i32(tcg_ctx, tmp, var, 3);
++    tcg_gen_andi_i32(tcg_ctx, tcg_ctx->cpu_VF, tmp, 0x80000000);
++    tcg_temp_free_i32(tcg_ctx, tmp);
++}
++#define gen_set_nzcv(var) gen_set_nzcv_direct(tcg_ctx, var)
+ 
+ static void gen_exception_internal(TCGContext *tcg_ctx, int excp)
+ {
+diff --git a/qemu/target/arm/vfp_helper.c b/qemu/target/arm/vfp_helper.c
+index 55bce595..f90a7f66 100644
+--- a/qemu/target/arm/vfp_helper.c
++++ b/qemu/target/arm/vfp_helper.c
+@@ -18,6 +18,7 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include <math.h> /* CRANKED_FAST_FLOAT */
+ #include "cpu.h"
+ #include "exec/helper-proto.h"
+ #include "internals.h"
+@@ -211,6 +212,41 @@ void vfp_set_fpscr(CPUARMState *env, uint32_t val)
+ 
+ #define VFP_HELPER(name, p) HELPER(glue(glue(vfp_,name),p))
+ 
++/* Cranked, optional: CRANKED_FAST_FLOAT=1: add, subtract, multiply, divide and fused multiply-add on the host's
++ * FPU, when FPSCR is in its default state (no flush to zero, no default NaN, round to nearest); a NaN result is
++ * recomputed in softfloat. Results are the same as softfloat's (IEEE arithmetic on both); only the cumulative
++ * exception flags in FPSCR are not raised by these operations. */
++typedef union { float32 s; float h; } vfp_uf32;
++typedef union { float64 s; double h; } vfp_uf64;
++static int vfp_fast_float = -1;
++static inline bool vfp_fast_path(const float_status *s)
++{
++    if (unlikely(vfp_fast_float < 0))
++        vfp_fast_float = getenv("CRANKED_FAST_FLOAT") != NULL;
++    return vfp_fast_float && !s->flush_to_zero && !s->flush_inputs_to_zero && !s->default_nan_mode &&
++           s->float_rounding_mode == float_round_nearest_even;
++}
++#define VFP_HOST32(expr) do { vfp_uf32 ua_, ub_, ur_; ua_.s = a; ub_.s = b; (void) ub_; ur_.h = (expr); \
++    if (likely(!isnan(ur_.h))) return ur_.s; } while (0)
++#define VFP_HOST64(expr) do { vfp_uf64 ua_, ub_, ur_; ua_.s = a; ub_.s = b; (void) ub_; ur_.h = (expr); \
++    if (likely(!isnan(ur_.h))) return ur_.s; } while (0)
++#define VFP_OP_add +
++#define VFP_OP_sub -
++#define VFP_OP_mul *
++#define VFP_OP_div /
++#define VFP_BINOP_FAST(name) \
++float32 VFP_HELPER(name, s)(float32 a, float32 b, void *fpstp) \
++{ \
++    float_status *fpst = fpstp; \
++    if (vfp_fast_path(fpst)) VFP_HOST32(ua_.h VFP_OP_ ## name ub_.h); \
++    return float32_ ## name(a, b, fpst); \
++} \
++float64 VFP_HELPER(name, d)(float64 a, float64 b, void *fpstp) \
++{ \
++    float_status *fpst = fpstp; \
++    if (vfp_fast_path(fpst)) VFP_HOST64(ua_.h VFP_OP_ ## name ub_.h); \
++    return float64_ ## name(a, b, fpst); \
++}
+ #define VFP_BINOP(name) \
+ float32 VFP_HELPER(name, s)(float32 a, float32 b, void *fpstp) \
+ { \
+@@ -222,10 +258,10 @@ float64 VFP_HELPER(name, d)(float64 a, float64 b, void *fpstp) \
+     float_status *fpst = fpstp; \
+     return float64_ ## name(a, b, fpst); \
+ }
+-VFP_BINOP(add)
+-VFP_BINOP(sub)
+-VFP_BINOP(mul)
+-VFP_BINOP(div)
++VFP_BINOP_FAST(add)
++VFP_BINOP_FAST(sub)
++VFP_BINOP_FAST(mul)
++VFP_BINOP_FAST(div)
+ VFP_BINOP(min)
+ VFP_BINOP(max)
+ VFP_BINOP(minnum)
+@@ -1062,12 +1098,24 @@ uint32_t HELPER(rsqrte_u32)(uint32_t a, void *fpstp)
+ float32 VFP_HELPER(muladd, s)(float32 a, float32 b, float32 c, void *fpstp)
+ {
+     float_status *fpst = fpstp;
++    if (vfp_fast_path(fpst)) { /* see vfp_fast_path */
++        vfp_uf32 ua_, ub_, uc_, ur_;
++        ua_.s = a; ub_.s = b; uc_.s = c;
++        ur_.h = fmaf(ua_.h, ub_.h, uc_.h);
++        if (likely(!isnan(ur_.h))) return ur_.s;
++    }
+     return float32_muladd(a, b, c, 0, fpst);
+ }
+ 
+ float64 VFP_HELPER(muladd, d)(float64 a, float64 b, float64 c, void *fpstp)
+ {
+     float_status *fpst = fpstp;
++    if (vfp_fast_path(fpst)) { /* see vfp_fast_path */
++        vfp_uf64 ua_, ub_, uc_, ur_;
++        ua_.s = a; ub_.s = b; uc_.s = c;
++        ur_.h = fma(ua_.h, ub_.h, uc_.h);
++        if (likely(!isnan(ur_.h))) return ur_.s;
++    }
+     return float64_muladd(a, b, c, 0, fpst);
+ }
+ 
+diff --git a/qemu/target/tricore/op_helper.c b/qemu/target/tricore/op_helper.c
+index 6bb7b3a0..e2c1c5fe 100644
+--- a/qemu/target/tricore/op_helper.c
++++ b/qemu/target/tricore/op_helper.c
+@@ -2290,7 +2290,7 @@ uint32_t helper_crc32(uint32_t arg0, uint32_t arg1)
+     uint8_t buf[4];
+     stl_be_p(buf, arg0);
+ 
+-    return crc32(arg1, buf, 4);
++    return qemu_crc32(arg1, buf, 4);
+ }
+ 
+ /* context save area (CSA) related helpers */
+diff --git a/qemu/tricore.h b/qemu/tricore.h
+index 937eb5d2..4a8285d0 100644
+--- a/qemu/tricore.h
++++ b/qemu/tricore.h
+@@ -1263,6 +1263,7 @@
+ #define tcg_exec_init tcg_exec_init_tricore
+ #define tb_cleanup tb_cleanup_tricore
+ #define tb_flush tb_flush_tricore
++#define tb_page_has_code tb_page_has_code_tricore
+ #define tb_phys_invalidate tb_phys_invalidate_tricore
+ #define tb_gen_code tb_gen_code_tricore
+ #define tb_exec_lock tb_exec_lock_tricore
+diff --git a/qemu/util/crc32c.c b/qemu/util/crc32c.c
+index e811d4de..70bd1431 100644
+--- a/qemu/util/crc32c.c
++++ b/qemu/util/crc32c.c
+@@ -187,7 +187,7 @@ static const uint32_t crc32_table[256] = {
+     0xB40BBE37U, 0xC30C8EA1U, 0x5A05DF1BU, 0x2D02EF8DU,
+ };
+ 
+-uint32_t crc32(uint32_t crc, const uint8_t *data, unsigned int length)
++uint32_t qemu_crc32(uint32_t crc, const uint8_t *data, unsigned int length)
+ {
+     int i;
+     crc = ~crc;
+diff --git a/qemu/x86_64.h b/qemu/x86_64.h
+index 637b8852..7bf52d41 100644
+--- a/qemu/x86_64.h
++++ b/qemu/x86_64.h
+@@ -1263,6 +1263,7 @@
+ #define tcg_exec_init tcg_exec_init_x86_64
+ #define tb_cleanup tb_cleanup_x86_64
+ #define tb_flush tb_flush_x86_64
++#define tb_page_has_code tb_page_has_code_x86_64
+ #define tb_phys_invalidate tb_phys_invalidate_x86_64
+ #define tb_gen_code tb_gen_code_x86_64
+ #define tb_exec_lock tb_exec_lock_x86_64

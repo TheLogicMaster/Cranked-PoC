@@ -1,0 +1,28 @@
+# Flatpak of the desktop front end, from the binary scripts/build.sh made (dist/desktop/cranked_desktop).
+# Built by scripts/package-linux.sh: flatpak-builder --user --install-deps-from=flathub ...
+app-id: org.cranked.ProofOfConcept
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+command: cranked_desktop
+finish-args:
+  - --share=ipc
+  - --socket=x11
+  - --socket=pulseaudio
+  - --device=all                # GPU and gamepads
+  - --filesystem=home:ro        # opening games from your files
+  - --filesystem=xdg-download:ro
+modules:
+  - name: cranked
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 cranked_desktop /app/bin/cranked_desktop
+      - install -Dm644 cranked.png /app/share/icons/hicolor/512x512/apps/org.cranked.ProofOfConcept.png
+      - install -Dm644 org.cranked.ProofOfConcept.desktop /app/share/applications/org.cranked.ProofOfConcept.desktop
+    sources:
+      - type: file
+        path: ../dist/desktop/cranked_desktop
+      - type: file
+        path: cranked.png
+      - type: file
+        path: org.cranked.ProofOfConcept.desktop

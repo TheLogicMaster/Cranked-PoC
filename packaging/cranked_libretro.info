@@ -1,0 +1,20 @@
+# RetroArch core information for the Cranked Proof of Concept core (copy next to the core, or into RetroArch's
+# "info" folder)
+display_name = "Panic - Playdate (Cranked PoC)"
+authors = "TheLogicMaster"
+supported_extensions = "pdx|zip"
+corename = "Cranked (Proof of Concept)"
+categories = "Emulator"
+license = "MIT"
+permissions = ""
+display_version = "PoC"
+manufacturer = "Panic"
+systemname = "Playdate"
+systemid = "playdate"
+database = ""
+supports_no_game = "false"
+needs_fullpath = "true"
+block_extract = "true"
+savestate = "false"
+firmware_count = 0
+notes = "Unsupported proof of concept. The crank: right analog stick, or L and R.|Playdate fonts by Panic Inc., licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/).|Playdate is a trademark of Panic Inc. This project is not affiliated with Panic."

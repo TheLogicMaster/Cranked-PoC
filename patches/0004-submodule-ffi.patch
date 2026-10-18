@@ -1,0 +1,196 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 4493131..b6f3041 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -24,7 +24,7 @@ if(NOT INSTALL_DIRECTORY)
+     set(INSTALL_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/out)
+ endif()
+ 
+-if(WIN32 OR MINGW)
++if((WIN32 OR MINGW) AND NOT MSVC)
+     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-deprecated-declarations -Wno-pointer-to-int-cast")
+ endif()
+ 
+@@ -62,14 +62,19 @@ if(NOT lower_system_processor IN_LIST KNOWN_PROCESSORS)
+     message(FATAL_ERROR "Unknown processor: ${CMAKE_SYSTEM_PROCESSOR}")
+ endif()
+ 
+-if(CMAKE_SYSTEM_NAME MATCHES "Windows" AND CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "arm")
+-    set(TARGET ARM_WIN32)
+-elseif(CMAKE_SYSTEM_NAME MATCHES "Windows" AND CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "arm64")
++# Emscripten: libffi's wasm32 port (calls through the function table, from JavaScript)
++if(EMSCRIPTEN)
++    set(TARGET WASM32)
++# Windows reports the processor as AMD64, x86 or ARM64 (upper case), so the checks are on the lower-cased name and
++# the pointer size; plain X86_64 would build the System V assembly, which MASM cannot assemble
++elseif(CMAKE_SYSTEM_NAME MATCHES "Windows" AND lower_system_processor MATCHES "^(arm64|aarch64)$")
+     set(TARGET ARM_WIN64)
+-elseif(CMAKE_SYSTEM_NAME MATCHES "Windows" AND CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "x86")
+-    set(TARGET X86_WIN32)
+-elseif(CMAKE_SYSTEM_NAME MATCHES "Windows" AND CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "x64")
++elseif(CMAKE_SYSTEM_NAME MATCHES "Windows" AND lower_system_processor MATCHES "^arm")
++    set(TARGET ARM_WIN32)
++elseif(CMAKE_SYSTEM_NAME MATCHES "Windows" AND CMAKE_SIZEOF_VOID_P EQUAL 8)
+     set(TARGET X86_WIN64)
++elseif(CMAKE_SYSTEM_NAME MATCHES "Windows")
++    set(TARGET X86_WIN32)
+ elseif(lower_system_processor MATCHES "arm64|aarch64")
+     set(TARGET ARM64)
+ elseif(lower_system_processor MATCHES "arm")
+@@ -97,7 +102,9 @@ set(FFI_EXEC_TRAMPOLINE_TABLE 0)
+ configure_file(${FFI_ROOT}/include/ffi.h.in ${CMAKE_CURRENT_BINARY_DIR}/include/ffi.h)
+ file(COPY ${FFI_CONFIG_FILE} DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
+ 
+-if ("${TARGET}" STREQUAL "ARM_WIN64" OR "${TARGET}" STREQUAL "ARM64")
++if ("${TARGET}" STREQUAL "WASM32")
++    file(COPY ${FFI_ROOT}/src/wasm32/ffitarget.h DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/include)
++elseif ("${TARGET}" STREQUAL "ARM_WIN64" OR "${TARGET}" STREQUAL "ARM64")
+     file(COPY ${FFI_ROOT}/src/aarch64/ffitarget.h DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/include)
+ elseif ("${TARGET}" STREQUAL "ARM_WIN32" OR "${TARGET}" STREQUAL "ARM")
+     file(COPY ${FFI_ROOT}/src/arm/ffitarget.h DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/include)
+@@ -126,7 +133,11 @@ set(FFI_SOURCES
+     ${FFI_ROOT}/src/types.c
+     ${FFI_ROOT}/src/tramp.c)
+ 
+-if ("${TARGET}" STREQUAL "ARM_WIN64" OR "${TARGET}" STREQUAL "ARM64")
++if ("${TARGET}" STREQUAL "WASM32")
++    set(FFI_SOURCES
++        ${FFI_SOURCES}
++        ${FFI_ROOT}/src/wasm32/ffi.c)
++elseif ("${TARGET}" STREQUAL "ARM_WIN64" OR "${TARGET}" STREQUAL "ARM64")
+     set(FFI_SOURCES
+         ${FFI_SOURCES}
+         ${FFI_ROOT}/src/aarch64/ffi.c)
+@@ -240,6 +251,8 @@ elseif("${TARGET}" STREQUAL "ARM_WIN64")
+     endif()
+ elseif("${TARGET}" STREQUAL "ARM64")
+     add_assembly(${FFI_ROOT}/src/aarch64/sysv.S)
++elseif("${TARGET}" STREQUAL "WASM32")
++    # no assembly: the wasm32 port is C with embedded JavaScript
+ else()
+     message(FATAL_ERROR "Target not implemented")
+ endif()
+@@ -267,6 +280,18 @@ if(WIN32 OR MINGW)
+ endif()
+ 
+ add_library(libffi ${FFI_SOURCES})
++# A static libffi under MSVC: without FFI_STATIC_BUILD, ffi.h declares everything dllimport, for both the library
++# and the code that uses it (PUBLIC passes the definition on)
++if(MSVC AND NOT (BUILD_SHARED_LIBS OR FFI_USE_SHARED_LIBS))
++    target_compile_definitions(libffi PUBLIC FFI_STATIC_BUILD)
++endif()
++# libffi is not compiled with AddressSanitizer when the build uses it: the x86-64 call moves the stack pointer
++# into a buffer it allocated with alloca, so the callee's frames overlap that buffer's redzones, and nested calls
++# (an API call that runs game code that makes another API call) would be reported as stack overflows
++string(FIND "${CMAKE_C_FLAGS}" "-fsanitize=address" FFI_ASAN)
++if (NOT FFI_ASAN EQUAL -1)
++    target_compile_options(libffi PRIVATE -fno-sanitize=address)
++endif ()
+ 
+ install(TARGETS libffi
+     EXPORT ${PROJECT_NAME}Targets
+diff --git a/src/wasm32/ffi.c b/src/wasm32/ffi.c
+index 1a8c9ae..46c0a80 100644
+--- a/src/wasm32/ffi.c
++++ b/src/wasm32/ffi.c
+@@ -367,55 +367,74 @@ ffi_call_js, (ffi_cif *cif, ffi_fp fn, void *rvalue, void **avalue),
+   if (nfixedargs != nargs) {
+     SIG(sig += 'i');
+     var struct_arg_info = [];
+-    for (var i = nargs - 1;  i >= nfixedargs; i--) {
++    // the callee's va_arg reads the arguments upwards from the pointer, each at its own alignment, so
++    // the block is laid out forwards: first the offsets, then one allocation. Laid out backwards from the stack top,
++    // an 8-byte argument followed by a 4-byte one would leave the padding in the wrong place, and every argument
++    // after it would be read at the wrong address (printf with "%f %d" after an odd number of 4-byte values).
++    var var_offsets = [];
++    var var_size = 0;
++    for (var i = nfixedargs; i < nargs; i++) {
++      var arg_type_id = unbox_small_structs(DEREF_U32(arg_types_ptr, i))[1];
++      var size = 4, align = 4;
++      switch (arg_type_id) {
++      case FFI_TYPE_UINT8:
++      case FFI_TYPE_SINT8:
++        size = 1; align = 1; break;
++      case FFI_TYPE_UINT16:
++      case FFI_TYPE_SINT16:
++        size = 2; align = 2; break;
++      case FFI_TYPE_DOUBLE:
++      case FFI_TYPE_UINT64:
++      case FFI_TYPE_SINT64:
++        size = 8; align = 8; break;
++      case FFI_TYPE_LONGDOUBLE:
++        size = 16; align = 8; break;
++      case FFI_TYPE_COMPLEX:
++        throw new Error('complex arg marshalling nyi');
++      default:
++        break; // 32-bit values, pointers, and structs (passed as a pointer to a copy, filled in below)
++      }
++      var_size = (var_size + align - 1) & ~(align - 1);
++      var_offsets.push(var_size);
++      var_size += size;
++    }
++    STACK_ALLOC(cur_stack_ptr, var_size, 8);
++    for (var i = nfixedargs; i < nargs; i++) {
+       var arg_ptr = DEREF_U32(avalue, i);
+       var arg_unboxed = unbox_small_structs(DEREF_U32(arg_types_ptr, i));
+       var arg_type_ptr = arg_unboxed[0];
+       var arg_type_id = arg_unboxed[1];
++      var slot = cur_stack_ptr + var_offsets[i - nfixedargs];
+       switch (arg_type_id) {
+       case FFI_TYPE_UINT8:
+       case FFI_TYPE_SINT8:
+-        STACK_ALLOC(cur_stack_ptr, 1, 1);
+-        DEREF_U8(cur_stack_ptr, 0) = DEREF_U8(arg_ptr, 0);
++        DEREF_U8(slot, 0) = DEREF_U8(arg_ptr, 0);
+         break;
+       case FFI_TYPE_UINT16:
+       case FFI_TYPE_SINT16:
+-        STACK_ALLOC(cur_stack_ptr, 2, 2);
+-        DEREF_U16(cur_stack_ptr, 0) = DEREF_U16(arg_ptr, 0);
+-        break;
+-      case FFI_TYPE_INT:
+-      case FFI_TYPE_UINT32:
+-      case FFI_TYPE_SINT32:
+-      case FFI_TYPE_POINTER:
+-      case FFI_TYPE_FLOAT:
+-        STACK_ALLOC(cur_stack_ptr, 4, 4);
+-        DEREF_U32(cur_stack_ptr, 0) = DEREF_U32(arg_ptr, 0);
++        DEREF_U16(slot, 0) = DEREF_U16(arg_ptr, 0);
+         break;
+       case FFI_TYPE_DOUBLE:
+       case FFI_TYPE_UINT64:
+       case FFI_TYPE_SINT64:
+-        STACK_ALLOC(cur_stack_ptr, 8, 8);
+-        DEREF_U32(cur_stack_ptr, 0) = DEREF_U32(arg_ptr, 0);
+-        DEREF_U32(cur_stack_ptr, 1) = DEREF_U32(arg_ptr, 1);
++        DEREF_U32(slot, 0) = DEREF_U32(arg_ptr, 0);
++        DEREF_U32(slot, 1) = DEREF_U32(arg_ptr, 1);
+         break;
+       case FFI_TYPE_LONGDOUBLE:
+-        STACK_ALLOC(cur_stack_ptr, 16, 8);
+-        DEREF_U32(cur_stack_ptr, 0) = DEREF_U32(arg_ptr, 0);
+-        DEREF_U32(cur_stack_ptr, 1) = DEREF_U32(arg_ptr, 1);
+-        DEREF_U32(cur_stack_ptr, 2) = DEREF_U32(arg_ptr, 2);
+-        DEREF_U32(cur_stack_ptr, 3) = DEREF_U32(arg_ptr, 3);
++        DEREF_U32(slot, 0) = DEREF_U32(arg_ptr, 0);
++        DEREF_U32(slot, 1) = DEREF_U32(arg_ptr, 1);
++        DEREF_U32(slot, 2) = DEREF_U32(arg_ptr, 2);
++        DEREF_U32(slot, 3) = DEREF_U32(arg_ptr, 3);
+         break;
+       case FFI_TYPE_STRUCT:
+         // Again, struct must be passed by pointer.
+         // But ABI is by value, so have to copy struct onto stack.
+         // Currently arguments are going onto stack so we can't put it there now. Come back for this.
+-        STACK_ALLOC(cur_stack_ptr, 4, 4);
+-        struct_arg_info.push([cur_stack_ptr, arg_ptr, FFI_TYPE__SIZE(arg_type_ptr), FFI_TYPE__ALIGN(arg_type_ptr)]);
++        struct_arg_info.push([slot, arg_ptr, FFI_TYPE__SIZE(arg_type_ptr), FFI_TYPE__ALIGN(arg_type_ptr)]);
+         break;
+-      case FFI_TYPE_COMPLEX:
+-        throw new Error('complex arg marshalling nyi');
+       default:
+-        throw new Error('Unexpected argtype ' + arg_type_id);
++        DEREF_U32(slot, 0) = DEREF_U32(arg_ptr, 0);
++        break;
+       }
+     }
+     // extra normal argument which is the pointer to the varargs.

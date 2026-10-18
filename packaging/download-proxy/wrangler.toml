@@ -1,0 +1,7 @@
+name = "cranked-poc-downloads"
+main = "worker.js"
+compatibility_date = "2026-01-01"
+
+[vars]
+CATALOG = "https://YOUR-USER.github.io/Cranked-PoC/games.json"
+ORIGIN = "https://YOUR-USER.github.io"

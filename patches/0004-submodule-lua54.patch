@@ -1,0 +1,968 @@
+diff --git a/lapi.c b/lapi.c
+index dab38134..4ffc2706 100644
+--- a/lapi.c
++++ b/lapi.c
+@@ -298,6 +298,24 @@ LUA_API int lua_isuserdata (lua_State *L, int idx) {
+ }
+ 
+ 
++/* Cranked: a table whose metatable has a true __opaque field behaves as userdata to Lua code (type,
++** iteration, raw access and new fields), as Playdate geometry objects do on the device */
++/* the highest positive index the running function may use, as the API's own check ("unacceptable index")
++** bounds it: Cranked raises the device's error for indices past it */
++LUA_API int lua_stackroom (lua_State *L) {
++  return cast_int(L->ci->top - (L->ci->func + 1));
++}
++
++LUA_API int lua_isopaque (lua_State *L, int idx) {
++  const TValue *o = index2value(L, idx);
++  Table *mt;
++  if (!ttistable(o)) return 0;
++  mt = hvalue(o)->metatable;
++  if (mt == NULL) return 0;
++  return !l_isfalse(luaH_getshortstr(mt, luaS_newliteral(L, "__opaque")));
++}
++
++
+ LUA_API int lua_rawequal (lua_State *L, int index1, int index2) {
+   const TValue *o1 = index2value(L, index1);
+   const TValue *o2 = index2value(L, index2);
+@@ -925,6 +943,9 @@ LUA_API int lua_setmetatable (lua_State *L, int objindex) {
+   switch (ttype(obj)) {
+     case LUA_TTABLE: {
+       hvalue(obj)->metatable = mt;
++      /* Cranked: geometry metatables mark their objects' fields as floats (see luaV_finishfastset) */
++      hvalue(obj)->floatints = mt != NULL &&
++          !l_isfalse(luaH_getshortstr(mt, luaS_newliteral(L, "__floatfields")));
+       if (mt) {
+         luaC_objbarrier(L, gcvalue(obj), mt);
+         luaC_checkfinalizer(L, gcvalue(obj), mt);
+diff --git a/lbaselib.c b/lbaselib.c
+index 747fd45a..ad7cac5c 100644
+--- a/lbaselib.c
++++ b/lbaselib.c
+@@ -136,7 +136,9 @@ static int luaB_getmetatable (lua_State *L) {
+ 
+ static int luaB_setmetatable (lua_State *L) {
+   int t = lua_type(L, 2);
+-  luaL_checktype(L, 1, LUA_TTABLE);
++  /* as on the device: Lua also sets the metatable of a full userdata, such as an
++     image ("bad argument #1 to 'setmetatable' (table or userdata expected, got number)" otherwise) */
++  luaL_argexpected(L, lua_type(L, 1) == LUA_TTABLE || lua_type(L, 1) == LUA_TUSERDATA, 1, "table or userdata");
+   luaL_argexpected(L, t == LUA_TNIL || t == LUA_TTABLE, 2, "nil or table");
+   if (luaL_getmetafield(L, 1, "__metatable") != LUA_TNIL)
+     return luaL_error(L, "cannot change a protected metatable");
+@@ -154,9 +156,16 @@ static int luaB_rawequal (lua_State *L) {
+ }
+ 
+ 
++/* Cranked: opaque tables (see lua_isopaque) are refused where userdata would be */
++static void checkplaintable (lua_State *L, int arg) {
++  luaL_checktype(L, arg, LUA_TTABLE);
++  if (lua_isopaque(L, arg)) luaL_typeerror(L, arg, "table");
++}
++
++
+ static int luaB_rawlen (lua_State *L) {
+   int t = lua_type(L, 1);
+-  luaL_argexpected(L, t == LUA_TTABLE || t == LUA_TSTRING, 1,
++  luaL_argexpected(L, (t == LUA_TTABLE && !lua_isopaque(L, 1)) || t == LUA_TSTRING, 1,
+                       "table or string");
+   lua_pushinteger(L, lua_rawlen(L, 1));
+   return 1;
+@@ -164,7 +173,7 @@ static int luaB_rawlen (lua_State *L) {
+ 
+ 
+ static int luaB_rawget (lua_State *L) {
+-  luaL_checktype(L, 1, LUA_TTABLE);
++  checkplaintable(L, 1);
+   luaL_checkany(L, 2);
+   lua_settop(L, 2);
+   lua_rawget(L, 1);
+@@ -172,7 +181,7 @@ static int luaB_rawget (lua_State *L) {
+ }
+ 
+ static int luaB_rawset (lua_State *L) {
+-  luaL_checktype(L, 1, LUA_TTABLE);
++  checkplaintable(L, 1);
+   luaL_checkany(L, 2);
+   luaL_checkany(L, 3);
+   lua_settop(L, 3);
+@@ -243,13 +252,14 @@ static int luaB_collectgarbage (lua_State *L) {
+ static int luaB_type (lua_State *L) {
+   int t = lua_type(L, 1);
+   luaL_argcheck(L, t != LUA_TNONE, 1, "value expected");
++  if (t == LUA_TTABLE && lua_isopaque(L, 1)) t = LUA_TUSERDATA;  /* Cranked: opaque tables */
+   lua_pushstring(L, lua_typename(L, t));
+   return 1;
+ }
+ 
+ 
+ static int luaB_next (lua_State *L) {
+-  luaL_checktype(L, 1, LUA_TTABLE);
++  checkplaintable(L, 1);
+   lua_settop(L, 2);  /* create a 2nd argument if there isn't one */
+   if (lua_next(L, 1))
+     return 2;
+diff --git a/ldebug.c b/ldebug.c
+index afdc2b74..a1d395ac 100644
+--- a/ldebug.c
++++ b/ldebug.c
+@@ -701,6 +701,23 @@ l_noret luaG_typeerror (lua_State *L, const TValue *o, const char *op) {
+ }
+ 
+ 
++/*
++** as in later Lua 5.4 releases (and on the device): calling a value that is not callable names
++** the call ("method 'x' is not callable (a nil value)") when the calling instruction tells what was called
++*/
++l_noret luaG_callerror (lua_State *L, const TValue *o) {
++  CallInfo *ci = L->ci;
++  const char *name = NULL;
++  const char *kind = NULL;
++  if (ci->callstatus & CIST_FIN) { name = "__gc"; kind = "metamethod"; }
++  else if (isLua(ci)) kind = funcnamefromcode(L, ci, &name);
++  if (kind != NULL)
++    luaG_runerror(L, "%s '%s' is not callable (a %s value)", kind, name, luaT_objtypename(L, o));
++  else
++    luaG_typeerror(L, o, "call");
++}
++
++
+ l_noret luaG_forerror (lua_State *L, const TValue *o, const char *what) {
+   luaG_runerror(L, "bad 'for' %s (number expected, got %s)",
+                    what, luaT_objtypename(L, o));
+diff --git a/ldebug.h b/ldebug.h
+index 1fe0efab..78935d99 100644
+--- a/ldebug.h
++++ b/ldebug.h
+@@ -24,6 +24,7 @@
+ LUAI_FUNC int luaG_getfuncline (const Proto *f, int pc);
+ LUAI_FUNC const char *luaG_findlocal (lua_State *L, CallInfo *ci, int n,
+                                                     StkId *pos);
++LUAI_FUNC l_noret luaG_callerror (lua_State *L, const TValue *o);
+ LUAI_FUNC l_noret luaG_typeerror (lua_State *L, const TValue *o,
+                                                 const char *opname);
+ LUAI_FUNC l_noret luaG_forerror (lua_State *L, const TValue *o,
+diff --git a/ldo.c b/ldo.c
+index c563b1d9..bbd24105 100644
+--- a/ldo.c
++++ b/ldo.c
+@@ -13,8 +13,11 @@
+ #include <setjmp.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <exception> /* callnative */
++#include <string>
+ 
+ #include "lua.h"
++#include "lauxlib.h" /* luaL_where */
+ 
+ #include "lapi.h"
+ #include "ldebug.h"
+@@ -139,8 +142,7 @@ l_noret luaD_throw (lua_State *L, int errcode) {
+ 
+ 
+ int luaD_rawrunprotected (lua_State *L, Pfunc f, void *ud) {
+-  global_State *g = G(L);
+-  l_uint32 oldnCcalls = g->Cstacklimit - (L->nCcalls + L->nci);
++  l_uint32 oldnCcalls = L->nCcalls; /* Lua 5.4.2 counting */
+   struct lua_longjmp lj;
+   lj.status = LUA_OK;
+   lj.previous = L->errorJmp;  /* chain new error handler */
+@@ -149,13 +151,39 @@ int luaD_rawrunprotected (lua_State *L, Pfunc f, void *ud) {
+     (*f)(L, ud);
+   );
+   L->errorJmp = lj.previous;  /* restore old error handler */
+-  L->nCcalls = g->Cstacklimit - oldnCcalls - L->nci;
++  L->nCcalls = oldnCcalls;
+   return lj.status;
+ }
+ 
+ /* }====================================================== */
+ 
+ 
++/*
++** Calls a C function. A C++ exception other than a Lua error (an emulator error raised by an API
++** function) becomes a Lua error, so the game's pcall can catch it. Inside a coroutine (where the game's update runs)
++** pcall has no try block of its own, and resume cannot recover from a non-Lua failure, so such an exception would
++** otherwise stop the game even under pcall.
++*/
++static int callnative (lua_State *L, lua_CFunction f) {
++  std::string text;
++  try {
++    return (*f)(L);
++  } catch (struct lua_longjmp *) {
++    throw;
++  } catch (std::exception &e) {
++    text = e.what();
++  } catch (...) {
++    text = "native exception";
++  }
++  /* as on the device, like luaL_error, the message starts with the calling Lua line
++     ("main.lua:6: invalid bitmap size: 0 x 20") */
++  luaL_where(L, 1);
++  lua_pushstring(L, text.c_str());
++  lua_concat(L, 2);
++  lua_error(L);
++  return 0;
++}
++
+ /*
+ ** {==================================================================
+ ** Stack reallocation
+@@ -356,7 +384,7 @@ void luaD_tryfuncTM (lua_State *L, StkId func) {
+   const TValue *tm = luaT_gettmbyobj(L, s2v(func), TM_CALL);
+   StkId p;
+   if (unlikely(ttisnil(tm)))
+-    luaG_typeerror(L, s2v(func), "call");  /* nothing to call */
++    luaG_callerror(L, s2v(func));  /* nothing to call */ /* names the call */
+   for (p = L->top; p > func; p--)  /* open space for metamethod */
+     setobjs2s(L, p, p-1);
+   L->top++;  /* stack space pre-allocated by the caller */
+@@ -455,7 +483,12 @@ void luaD_pretailcall (lua_State *L, CallInfo *ci, StkId func, int narg1) {
+ ** When returns, all the results are on the stack, starting at the original
+ ** function position.
+ */
+-void luaD_call (lua_State *L, StkId func, int nresults) {
++/*
++** (Lua 5.4.2) Prepares the call to a function (C or Lua). For C functions, also do the call. Returns the
++** CallInfo to be executed, if it was a Lua function. Otherwise (a C function) returns NULL, with all the results on
++** the stack, starting at the original function position.
++*/
++CallInfo *luaD_precall (lua_State *L, StkId func, int nresults) {
+   lua_CFunction f;
+  retry:
+   switch (ttypetag(s2v(func))) {
+@@ -479,11 +512,11 @@ void luaD_call (lua_State *L, StkId func, int nresults) {
+         luaD_hook(L, LUA_HOOKCALL, -1, 1, narg);
+       }
+       lua_unlock(L);
+-      n = (*f)(L);  /* do the actual call */
++      n = callnative(L, f);  /* do the actual call */
+       lua_lock(L);
+       api_checknelems(L, n);
+       luaD_poscall(L, ci, n);
+-      break;
++      return NULL;
+     }
+     case LUA_VLCL: {  /* Lua function */
+       CallInfo *ci = next_ci(L);
+@@ -494,15 +527,14 @@ void luaD_call (lua_State *L, StkId func, int nresults) {
+       checkstackp(L, fsize, func);
+       ci->nresults = nresults;
+       ci->u.l.savedpc = p->code;  /* starting point */
+-      ci->callstatus = 0;
++      ci->callstatus = 0; /* a fresh frame is marked by the caller */
+       ci->top = func + 1 + fsize;
+       ci->func = func;
+       L->ci = ci;
+       for (; narg < nfixparams; narg++)
+         setnilvalue(s2v(L->top++));  /* complete missing arguments */
+       lua_assert(ci->top <= L->stack_last);
+-      luaV_execute(L, ci);  /* run the function */
+-      break;
++      return ci;
+     }
+     default: {  /* not a function */
+       checkstackp(L, 1, func);  /* space for metamethod */
+@@ -519,12 +551,33 @@ void luaD_call (lua_State *L, StkId func, int nresults) {
+ ** force the subsequent call to invoke 'luaE_extendCI', which then
+ ** will raise any errors.
+ */
++/*
++** (Lua 5.4.2) Call a function (C or Lua) through C. 'inc' can be 1 (increment number of recursive
++** invocations in the C stack) or nyci (the same plus increment number of non-yieldable calls).
++*/
++static void ccall (lua_State *L, StkId func, int nResults, int inc) {
++  CallInfo *ci;
++  L->nCcalls += inc;
++  if (unlikely(getCcalls(L) >= LUAI_MAXCCALLS))
++    luaE_checkcstack(L);
++  if ((ci = luaD_precall(L, func, nResults)) != NULL) {  /* Lua function? */
++    ci->callstatus = CIST_FRESH;  /* mark that it is a "fresh" execute */
++    luaV_execute(L, ci);  /* call it */
++  }
++  L->nCcalls -= inc;
++}
++
++
++/*
++** External interface for 'ccall'
++*/
++void luaD_call (lua_State *L, StkId func, int nResults) {
++  ccall(L, func, nResults, 1);
++}
++
++
+ void luaD_callnoyield (lua_State *L, StkId func, int nResults) {
+-  incXCcalls(L);
+-  if (getCcalls(L) <= CSTACKERR)  /* possible stack overflow? */
+-    luaE_freeCI(L);
+-  luaD_call(L, func, nResults);
+-  decXCcalls(L);
++  ccall(L, func, nResults, nyci);
+ }
+ 
+ 
+@@ -638,9 +691,8 @@ static void resume (lua_State *L, void *ud) {
+   int n = *(cast(int*, ud));  /* number of arguments */
+   StkId firstArg = L->top - n;  /* first argument */
+   CallInfo *ci = L->ci;
+-  if (L->status == LUA_OK) {  /* starting a coroutine? */
+-    luaD_call(L, firstArg - 1, LUA_MULTRET);
+-  }
++  if (L->status == LUA_OK)  /* starting a coroutine? */
++    ccall(L, firstArg - 1, LUA_MULTRET, 0);  /* just call its body */ /* as in Lua 5.4.4 */
+   else {  /* resuming from previous yield */
+     lua_assert(L->status == LUA_YIELD);
+     L->status = LUA_OK;  /* mark that it is running (again) */
+@@ -671,12 +723,10 @@ LUA_API int lua_resume (lua_State *L, lua_State *from, int nargs,
+   }
+   else if (L->status != LUA_YIELD)  /* ended with errors? */
+     return resume_error(L, "cannot resume dead coroutine", nargs);
+-  if (from == NULL)
+-    L->nCcalls = CSTACKTHREAD;
+-  else  /* correct 'nCcalls' for this thread */
+-    L->nCcalls = getCcalls(from) + from->nci - L->nci - CSTACKCF;
+-  if (L->nCcalls <= CSTACKERR)
++  L->nCcalls = (from) ? getCcalls(from) : 0; /* as in Lua 5.4.2 */
++  if (getCcalls(L) >= LUAI_MAXCCALLS)
+     return resume_error(L, "C stack overflow", nargs);
++  L->nCcalls++;
+   luai_userstateresume(L, nargs);
+   api_checknelems(L, (L->status == LUA_OK) ? nargs + 1 : nargs);
+   status = luaD_rawrunprotected(L, resume, &nargs);
+diff --git a/ldo.h b/ldo.h
+index 7760f853..c78a275d 100644
+--- a/ldo.h
++++ b/ldo.h
+@@ -57,6 +57,7 @@ LUAI_FUNC void luaD_hook (lua_State *L, int event, int line,
+                                         int fTransfer, int nTransfer);
+ LUAI_FUNC void luaD_hookcall (lua_State *L, CallInfo *ci);
+ LUAI_FUNC void luaD_pretailcall (lua_State *L, CallInfo *ci, StkId func, int n);
++LUAI_FUNC CallInfo *luaD_precall (lua_State *L, StkId func, int nResults); /* as in Lua 5.4.2 */
+ LUAI_FUNC void luaD_call (lua_State *L, StkId func, int nResults);
+ LUAI_FUNC void luaD_callnoyield (lua_State *L, StkId func, int nResults);
+ LUAI_FUNC void luaD_tryfuncTM (lua_State *L, StkId func);
+diff --git a/llimits.h b/llimits.h
+index b86d3452..2740da75 100644
+--- a/llimits.h
++++ b/llimits.h
+@@ -186,6 +186,16 @@ typedef unsigned long l_uint32;
+ typedef l_uint32 Instruction;
+ 
+ 
++/*
++** (Lua 5.4.2) Maximum depth for nested C calls, syntactical nested non-terminals, and other features
++** implemented through recursion in C. (Value must fit in a 16-bit unsigned integer. It must also be compatible with
++** the size of the C stack.)
++*/
++#if !defined(LUAI_MAXCCALLS)
++#define LUAI_MAXCCALLS		200
++#endif
++
++
+ 
+ /*
+ ** Maximum length for short strings, that is, strings that are
+diff --git a/lmathlib.c b/lmathlib.c
+index 86def470..5669cf9e 100644
+--- a/lmathlib.c
++++ b/lmathlib.c
+@@ -608,8 +608,8 @@ static void setseed (lua_State *L, Rand64 *state,
+ ** randomization).
+ */
+ static void randseed (lua_State *L, RanState *state) {
+-  lua_Unsigned seed1 = (lua_Unsigned)time(NULL);
+-  lua_Unsigned seed2 = (lua_Unsigned)(size_t)L;
++  lua_Unsigned seed1 = lua_fixedseed ? (lua_Unsigned)lua_fixedseed : (lua_Unsigned)time(NULL); /* fixed seed: see lua.h */
++  lua_Unsigned seed2 = lua_fixedseed ? 0 : (lua_Unsigned)(size_t)L;
+   setseed(L, state->s, seed1, seed2);
+ }
+ 
+diff --git a/lobject.h b/lobject.h
+index e7cf63f8..55823996 100644
+--- a/lobject.h
++++ b/lobject.h
+@@ -713,6 +713,7 @@ typedef struct Table {
+   CommonHeader;
+   lu_byte flags;  /* 1<<p means tagmethod(p) is not present */
+   lu_byte lsizenode;  /* log2 of size of 'node' array */
++  lu_byte floatints;  /* Cranked: integers stored in it become floats (see lua_setmetatable) */
+   unsigned int alimit;  /* "limit" of 'array' array */
+   TValue *array;  /* array part */
+   Node *node;
+diff --git a/lparser.c b/lparser.c
+index b7355fb4..d0adc28a 100644
+--- a/lparser.c
++++ b/lparser.c
+@@ -492,7 +492,7 @@ static void adjust_assign (LexState *ls, int nvars, int nexps, expdesc *e) {
+ /*
+ ** Macros to limit the maximum recursion depth while parsing
+ */
+-#define enterlevel(ls)	luaE_enterCcall((ls)->L)
++#define enterlevel(ls)	luaE_incCstack((ls)->L) /* Lua 5.4.2 counting */
+ 
+ #define leavelevel(ls)	luaE_exitCcall((ls)->L)
+ 
+diff --git a/lstate.c b/lstate.c
+index 4434211a..dde2e7b6 100644
+--- a/lstate.c
++++ b/lstate.c
+@@ -24,6 +24,9 @@
+ #include "lmem.h"
+ #include "lstate.h"
+ #include "lstring.h"
++
++/* Cranked: maps host pointers to emulated addresses for tostring and %p */
++unsigned int (*lua_cranked_pointer_hook)(const void *p) = NULL;
+ #include "ltable.h"
+ #include "ltm.h"
+ 
+@@ -55,9 +58,12 @@ typedef struct LG {
+ ** A macro to create a "random" seed when a state is created;
+ ** the seed is used to randomize string hashes.
+ */
++unsigned int lua_fixedseed = 0; /* see lua.h */
++
+ #if !defined(luai_makeseed)
+ 
+ #include <time.h>
++#include <stdlib.h>
+ 
+ /*
+ ** Compute an initial seed with some level of randomness.
+@@ -69,6 +75,10 @@ typedef struct LG {
+     memcpy(b + p, &t, sizeof(t)); p += sizeof(t); }
+ 
+ static unsigned int luai_makeseed (lua_State *L) {
++  /* an optional fixed seed (environment CRANKED_LUA_SEED) makes string hashing, and so pairs() order
++     over string keys, repeatable. Without it the seed varies per run, as on the device. */
++  const char *fixed = getenv("CRANKED_LUA_SEED");
++  if (fixed && *fixed) return (unsigned int) strtoul(fixed, NULL, 0);
+   char buff[3 * sizeof(size_t)];
+   unsigned int h = cast_uint(time(NULL));
+   int p = 0;
+@@ -97,66 +107,35 @@ void luaE_setdebt (global_State *g, l_mem debt) {
+ 
+ 
+ LUA_API int lua_setcstacklimit (lua_State *L, unsigned int limit) {
+-  global_State *g = G(L);
+-  int ccalls;
+-  luaE_freeCI(L);  /* release unused CIs */
+-  ccalls = getCcalls(L);
+-  if (limit >= 40000)
+-    return 0;  /* out of bounds */
+-  limit += CSTACKERR;
+-  if (L != g-> mainthread)
+-    return 0;  /* only main thread can change the C stack */
+-  else if (ccalls <= CSTACKERR)
+-    return 0;  /* handling overflow */
+-  else {
+-    int diff = limit - g->Cstacklimit;
+-    if (ccalls + diff <= CSTACKERR)
+-      return 0;  /* new limit would cause an overflow */
+-    g->Cstacklimit = limit;  /* set new limit */
+-    L->nCcalls += diff;  /* correct 'nCcalls' */
+-    return limit - diff - CSTACKERR;  /* success; return previous limit */
+-  }
++  /* as in Lua 5.4.2 and later: the C-stack limit is fixed */
++  UNUSED(L); UNUSED(limit);
++  return LUAI_MAXCCALLS;
+ }
+ 
+ 
+ /*
+-** Decrement count of "C calls" and check for overflows. In case of
+-** a stack overflow, check appropriate error ("regular" overflow or
+-** overflow while handling stack overflow).  If 'nCcalls' is smaller
+-** than CSTACKERR but larger than CSTACKMARK, it means it has just
+-** entered the "overflow zone", so the function raises an overflow
+-** error.  If 'nCcalls' is smaller than CSTACKMARK (which means it is
+-** already handling an overflow) but larger than CSTACKERRMARK, does
+-** not report an error (to allow message handling to work). Otherwise,
+-** report a stack overflow while handling a stack overflow (probably
+-** caused by a repeating error in the message handling function).
++** (Lua 5.4.2) Called when 'getCcalls(L)' larger or equal to LUAI_MAXCCALLS. If equal, raises an overflow
++** error. If value is larger than LUAI_MAXCCALLS (which means it is handling an overflow) but not much larger, does
++** not report an error (to allow overflow handling to work).
+ */
++void luaE_checkcstack (lua_State *L) {
++  if (getCcalls(L) == LUAI_MAXCCALLS)
++    luaG_runerror(L, "C stack overflow");
++  else if (getCcalls(L) >= (LUAI_MAXCCALLS / 10 * 11))
++    luaD_throw(L, LUA_ERRERR);  /* error while handing stack error */
++}
+ 
+-void luaE_enterCcall (lua_State *L) {
+-  int ncalls = getCcalls(L);
+-  L->nCcalls--;
+-  if (ncalls <= CSTACKERR) {  /* possible overflow? */
+-    luaE_freeCI(L);  /* release unused CIs */
+-    ncalls = getCcalls(L);  /* update call count */
+-    if (ncalls <= CSTACKERR) {  /* still overflow? */
+-      if (ncalls <= CSTACKERRMARK)  /* below error-handling zone? */
+-        luaD_throw(L, LUA_ERRERR);  /* error while handling stack error */
+-      else if (ncalls >= CSTACKMARK) {
+-        /* not in error-handling zone; raise the error now */
+-        L->nCcalls = (CSTACKMARK - 1);  /* enter error-handling zone */
+-        luaG_runerror(L, "C stack overflow");
+-      }
+-      /* else stack is in the error-handling zone;
+-         allow message handler to work */
+-    }
+-  }
++
++LUAI_FUNC void luaE_incCstack (lua_State *L) {
++  L->nCcalls++;
++  if (unlikely(getCcalls(L) >= LUAI_MAXCCALLS))
++    luaE_checkcstack(L);
+ }
+ 
+ 
+ CallInfo *luaE_extendCI (lua_State *L) {
+   CallInfo *ci;
+   lua_assert(L->ci->next == NULL);
+-  luaE_enterCcall(L);
+   ci = luaM_new(L, CallInfo);
+   lua_assert(L->ci->next == NULL);
+   L->ci->next = ci;
+@@ -175,13 +154,11 @@ void luaE_freeCI (lua_State *L) {
+   CallInfo *ci = L->ci;
+   CallInfo *next = ci->next;
+   ci->next = NULL;
+-  L->nCcalls += L->nci;  /* add removed elements back to 'nCcalls' */
+   while ((ci = next) != NULL) {
+     next = ci->next;
+     luaM_free(L, ci);
+     L->nci--;
+   }
+-  L->nCcalls -= L->nci;  /* adjust result */
+ }
+ 
+ 
+@@ -194,7 +171,6 @@ void luaE_shrinkCI (lua_State *L) {
+   CallInfo *next;
+   if (ci == NULL)
+     return;  /* no extra elements */
+-  L->nCcalls += L->nci;  /* add removed elements back to 'nCcalls' */
+   while ((next = ci->next) != NULL) {  /* two extra elements? */
+     CallInfo *next2 = next->next;  /* next's next */
+     ci->next = next2;  /* remove next from the list */
+@@ -207,7 +183,6 @@ void luaE_shrinkCI (lua_State *L) {
+       ci = next2;  /* continue */
+     }
+   }
+-  L->nCcalls -= L->nci;  /* adjust result */
+ }
+ 
+ 
+@@ -333,7 +308,7 @@ LUA_API lua_State *lua_newthread (lua_State *L) {
+   setthvalue2s(L, L->top, L1);
+   api_incr_top(L);
+   preinit_thread(L1, g);
+-  L1->nCcalls = getCcalls(L);
++  L1->nCcalls = 0;
+   L1->hookmask = L->hookmask;
+   L1->basehookcount = L->basehookcount;
+   L1->hook = L->hook;
+@@ -394,13 +369,14 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud) {
+   preinit_thread(L, g);
+   g->allgc = obj2gco(L);  /* by now, only object is the main thread */
+   L->next = NULL;
+-  g->Cstacklimit = L->nCcalls = LUAI_MAXCSTACK + CSTACKERR;
++  L->nCcalls = 0;
++  incnny(L);  /* main thread is always non yieldable */
+   g->frealloc = f;
+   g->ud = ud;
+   g->warnf = NULL;
+   g->ud_warn = NULL;
+   g->mainthread = L;
+-  g->seed = luai_makeseed(L);
++  g->seed = lua_fixedseed ? lua_fixedseed : luai_makeseed(L); /* fixed seed: see lua.h */
+   g->gcrunning = 0;  /* no GC while building state */
+   g->strt.size = g->strt.nuse = 0;
+   g->strt.hash = NULL;
+diff --git a/lstate.h b/lstate.h
+index 2e8bd6c4..d172f2fd 100644
+--- a/lstate.h
++++ b/lstate.h
+@@ -63,68 +63,26 @@
+ 
+ 
+ /*
+-** About 'nCcalls': each thread in Lua (a lua_State) keeps a count of
+-** how many "C calls" it still can do in the C stack, to avoid C-stack
+-** overflow.  This count is very rough approximation; it considers only
+-** recursive functions inside the interpreter, as non-recursive calls
+-** can be considered using a fixed (although unknown) amount of stack
+-** space.
+-**
+-** The count has two parts: the lower part is the count itself; the
+-** higher part counts the number of non-yieldable calls in the stack.
+-** (They are together so that we can change both with one instruction.)
+-**
+-** Because calls to external C functions can use an unknown amount
+-** of space (e.g., functions using an auxiliary buffer), calls
+-** to these functions add more than one to the count (see CSTACKCF).
+-**
+-** The proper count excludes the number of CallInfo structures allocated
+-** by Lua, as a kind of "potential" calls. So, when Lua calls a function
+-** (and "consumes" one CallInfo), it needs neither to decrement nor to
+-** check 'nCcalls', as its use of C stack is already accounted for.
++** About 'nCcalls' (as in Lua 5.4.2 and later, which the device uses): the lower 16 bits count
++** the recursive invocations in the C stack; the higher 16 bits count the non-yieldable calls in the stack. A Lua
++** function calling another Lua function no longer recurses in C (it runs in the same 'luaV_execute' frame), so only
++** calls through C count, and deep Lua recursion is limited by the Lua stack size (LUAI_MAXSTACK) instead.
+ */
+ 
+-/* number of "C stack slots" used by an external C function */
+-#define CSTACKCF	10
+-
+-
+-/*
+-** The C-stack size is sliced in the following zones:
+-** - larger than CSTACKERR: normal stack;
+-** - [CSTACKMARK, CSTACKERR]: buffer zone to signal a stack overflow;
+-** - [CSTACKCF, CSTACKERRMARK]: error-handling zone;
+-** - below CSTACKERRMARK: buffer zone to signal overflow during overflow;
+-** (Because the counter can be decremented CSTACKCF at once, we need
+-** the so called "buffer zones", with at least that size, to properly
+-** detect a change from one zone to the next.)
+-*/
+-#define CSTACKERR	(8 * CSTACKCF)
+-#define CSTACKMARK	(CSTACKERR - (CSTACKCF + 2))
+-#define CSTACKERRMARK	(CSTACKCF + 2)
+-
+-
+-/* initial limit for the C-stack of threads */
+-#define CSTACKTHREAD	(2 * CSTACKERR)
+-
+-
+ /* true if this thread does not have non-yieldable calls in the stack */
+ #define yieldable(L)		(((L)->nCcalls & 0xffff0000) == 0)
+ 
+ /* real number of C calls */
+ #define getCcalls(L)	((L)->nCcalls & 0xffff)
+ 
+-
+ /* Increment the number of non-yieldable calls */
+ #define incnny(L)	((L)->nCcalls += 0x10000)
+ 
+ /* Decrement the number of non-yieldable calls */
+ #define decnny(L)	((L)->nCcalls -= 0x10000)
+ 
+-/* Increment the number of non-yieldable calls and decrement nCcalls */
+-#define incXCcalls(L)	((L)->nCcalls += 0x10000 - CSTACKCF)
+-
+-/* Decrement the number of non-yieldable calls and increment nCcalls */
+-#define decXCcalls(L)	((L)->nCcalls -= 0x10000 - CSTACKCF)
++/* Non-yieldable call increment */
++#define nyci	(0x10000 | 1)
+ 
+ 
+ 
+@@ -209,6 +167,7 @@ typedef struct CallInfo {
+ #if defined(LUA_COMPAT_LT_LE)
+ #define CIST_LEQ	(1<<8)  /* using __lt for __le */
+ #endif
++#define CIST_FRESH	(1<<9)  /* call is on a fresh "luaV_execute" frame (Lua 5.4.2) */
+ 
+ /* active function is a Lua function */
+ #define isLua(ci)	(!((ci)->callstatus & CIST_C))
+@@ -353,12 +312,13 @@ LUAI_FUNC void luaE_freethread (lua_State *L, lua_State *L1);
+ LUAI_FUNC CallInfo *luaE_extendCI (lua_State *L);
+ LUAI_FUNC void luaE_freeCI (lua_State *L);
+ LUAI_FUNC void luaE_shrinkCI (lua_State *L);
+-LUAI_FUNC void luaE_enterCcall (lua_State *L);
++LUAI_FUNC void luaE_checkcstack (lua_State *L);
++LUAI_FUNC void luaE_incCstack (lua_State *L);
+ LUAI_FUNC void luaE_warning (lua_State *L, const char *msg, int tocont);
+ LUAI_FUNC void luaE_warnerror (lua_State *L, const char *where);
+ 
+ 
+-#define luaE_exitCcall(L)	((L)->nCcalls++)
++#define luaE_exitCcall(L)	((L)->nCcalls--)
+ 
+ #endif
+ 
+diff --git a/lstrlib.c b/lstrlib.c
+index 2ba8bde4..cd7e1387 100644
+--- a/lstrlib.c
++++ b/lstrlib.c
+@@ -1275,6 +1275,12 @@ static int str_format (lua_State *L) {
+             p = "(null)";  /* result */
+             form[strlen(form) - 1] = 's';  /* format it as a string */
+           }
++          else {  /* Cranked: format the emulated address */
++            static char pbuf[32];
++            lua_pointer2str(pbuf, sizeof(pbuf), p);
++            p = pbuf;
++            form[strlen(form) - 1] = 's';
++          }
+           nb = l_sprintf(buff, maxitem, form, p);
+           break;
+         }
+diff --git a/ltable.c b/ltable.c
+index d7eb69a2..2822020c 100644
+--- a/ltable.c
++++ b/ltable.c
+@@ -584,6 +584,7 @@ Table *luaH_new (lua_State *L) {
+   Table *t = gco2t(o);
+   t->metatable = NULL;
+   t->flags = cast_byte(~0);
++  t->floatints = 0;  /* Cranked: see luaV_finishfastset */
+   t->array = NULL;
+   t->alimit = 0;
+   setnodevector(L, t, 0);
+diff --git a/ltablib.c b/ltablib.c
+index ee5da216..96538efa 100644
+--- a/ltablib.c
++++ b/ltablib.c
+@@ -44,7 +44,8 @@ static int checkfield (lua_State *L, const char *key, int n) {
+ ** has a metatable with the required metamethods)
+ */
+ static void checktab (lua_State *L, int arg, int what) {
+-  if (lua_type(L, arg) != LUA_TTABLE) {  /* is it not a table? */
++  /* Cranked: an opaque table (see lua_isopaque) counts as userdata here */
++  if (lua_type(L, arg) != LUA_TTABLE || lua_isopaque(L, arg)) {  /* is it not a table? */
+     int n = 1;  /* number of elements to pop */
+     if (lua_getmetatable(L, arg) &&  /* must have metatable */
+         (!(what & TAB_R) || checkfield(L, "__index", ++n)) &&
+@@ -53,7 +54,7 @@ static void checktab (lua_State *L, int arg, int what) {
+       lua_pop(L, n);  /* pop metatable and tested metamethods */
+     }
+     else
+-      luaL_checktype(L, arg, LUA_TTABLE);  /* force an error */
++      luaL_typeerror(L, arg, "table");  /* force an error */
+   }
+ }
+ 
+diff --git a/lua.h b/lua.h
+index b87ee9e3..39e04e84 100644
+--- a/lua.h
++++ b/lua.h
+@@ -224,6 +224,12 @@ LUA_API void  (lua_arith) (lua_State *L, int op);
+ #define LUA_OPLE	2
+ 
+ LUA_API int   (lua_rawequal) (lua_State *L, int idx1, int idx2);
++/* Cranked: a table whose metatable has a true __opaque field behaves as userdata to Lua code */
++LUA_API int   (lua_isopaque) (lua_State *L, int idx);
++LUA_API int   (lua_stackroom) (lua_State *L); /* slots the running function may index (ci->top - func - 1) */
++/* when nonzero, new states use it for the string hash seed and math.random's initial state, instead of
++** the time and addresses (reproducible runs; Cranked sets it with its virtual clock) */
++extern unsigned int lua_fixedseed;
+ LUA_API int   (lua_compare) (lua_State *L, int idx1, int idx2, int op);
+ 
+ 
+diff --git a/luaconf.h b/luaconf.h
+index e3214610..45ae1a99 100644
+--- a/luaconf.h
++++ b/luaconf.h
+@@ -618,7 +618,10 @@
+ @@ lua_pointer2str converts a pointer to a readable string in a
+ ** non-specified way.
+ */
+-#define lua_pointer2str(buff,sz,p)	l_sprintf(buff,sz,"%p",p)
++/* Cranked: show 32-bit emulated addresses, as printed on the device (0x, unpadded hex) */
++extern unsigned int (*lua_cranked_pointer_hook)(const void *p);
++#define lua_pointer2str(buff,sz,p)	(lua_cranked_pointer_hook ? \
++	l_sprintf(buff,sz,"0x%x",lua_cranked_pointer_hook(p)) : l_sprintf(buff,sz,"%p",p))
+ 
+ 
+ /*
+diff --git a/lvm.c b/lvm.c
+index 6dbc6a8f..42830f81 100644
+--- a/lvm.c
++++ b/lvm.c
+@@ -327,6 +327,16 @@ void luaV_finishget (lua_State *L, const TValue *t, TValue *key, StkId val,
+ ** is no such entry.  (The value at 'slot' must be empty, otherwise
+ ** 'luaV_fastget' would have done the job.)
+ */
++/* Cranked: geometry objects (metatables with __floatfields) keep numbers as floats, as the device's
++** float fields do; a numeric string is converted as luaL_checknumber would (measured: p.x = "5" reads 5.0) */
++void luaV_setfloatint (lua_State *L, TValue *slot, const TValue *v) {
++  lua_Number n;
++  if (ttisinteger(v)) { setfltvalue(slot, cast_num(ivalue(v))); }
++  else if (ttisstring(v) && luaV_tonumber_(v, &n)) { setfltvalue(slot, n); }
++  else { setobj2t(L, slot, v); }
++}
++
++
+ void luaV_finishset (lua_State *L, const TValue *t, TValue *key,
+                      TValue *val, const TValue *slot) {
+   int loop;  /* counter to avoid infinite loops */
+@@ -337,10 +347,19 @@ void luaV_finishset (lua_State *L, const TValue *t, TValue *key,
+       lua_assert(isempty(slot));  /* slot must be empty */
+       tm = fasttm(L, h->metatable, TM_NEWINDEX);  /* get metamethod */
+       if (tm == NULL) {  /* no metamethod? */
+-        if (isabstkey(slot))  /* no previous entry? */
++        if (isabstkey(slot)) {  /* no previous entry? */
++          /* Cranked: opaque tables (see lua_isopaque) take no new fields, as userdata */
++          if (h->metatable != NULL &&
++              !l_isfalse(luaH_getshortstr(h->metatable, luaS_newliteral(L, "__opaque"))))
++            luaG_runerror(L, "attempt to index a userdata value");
+           slot = luaH_newkey(L, h, key);  /* create one */
++        }
+         /* no metamethod and (now) there is an entry with given key */
+-        setobj2t(L, cast(TValue *, slot), val);  /* set its new value */
++        if (unlikely(h->floatints)) {  /* see luaV_finishfastset */
++          luaV_setfloatint(L, cast(TValue *, slot), val);
++        } else {
++          setobj2t(L, cast(TValue *, slot), val);  /* set its new value */
++        }
+         invalidateTMcache(h);
+         luaC_barrierback(L, obj2gco(h), val);
+         return;
+@@ -1133,17 +1152,22 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
+ #if LUA_USE_JUMPTABLE
+ #include "ljumptab.h"
+ #endif
+- tailcall:
++ /* (Lua 5.4.2) Lua-to-Lua calls and returns run in this same C frame: 'startfunc' begins a called
++    function, 'returning' continues a caller after its callee returned. Only calls through C recurse in C. */
++ startfunc:
+   trap = L->hookmask;
++ returning:  /* trap already set */
+   cl = clLvalue(s2v(ci->func));
+   k = cl->p->k;
+   pc = ci->u.l.savedpc;
+   if (trap) {
+-    if (cl->p->is_vararg)
+-      trap = 0;  /* hooks will start after VARARGPREP instruction */
+-    else if (pc == cl->p->code)  /* first instruction (not resuming)? */
+-      luaD_hookcall(L, ci);
+-    ci->u.l.trap = 1;  /* there may be other hooks */
++    if (pc == cl->p->code) {  /* first instruction (not resuming)? */
++      if (cl->p->is_vararg)
++        trap = 0;  /* hooks will start after VARARGPREP instruction */
++      else  /* check 'call' hook */
++        luaD_hookcall(L, ci);
++    }
++    ci->u.l.trap = 1;  /* assume trap is on, for now */
+   }
+   base = ci->func + 1;
+   /* main loop of interpreter */
+@@ -1612,12 +1636,20 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
+         vmbreak;
+       }
+       vmcase(OP_CALL) {
++        CallInfo *newci;
+         int b = GETARG_B(i);
+         int nresults = GETARG_C(i) - 1;
+         if (b != 0)  /* fixed number of arguments? */
+           L->top = ra + b;  /* top signals number of arguments */
+         /* else previous instruction set top */
+-        ProtectNT(luaD_call(L, ra, nresults));
++        savepc(L);  /* in case of errors */
++        if ((newci = luaD_precall(L, ra, nresults)) == NULL)
++          updatetrap(ci);  /* C call; nothing else to be done */
++        else {  /* Lua call: run function in this same C frame */
++          ci = newci;
++          ci->callstatus = 0;  /* call re-uses 'luaV_execute' */
++          goto startfunc;
++        }
+         vmbreak;
+       }
+       vmcase(OP_TAILCALL) {
+@@ -1643,16 +1675,17 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
+           checkstackp(L, 1, ra);
+         }
+         if (!ttisLclosure(s2v(ra))) {  /* C function? */
+-          luaD_call(L, ra, LUA_MULTRET);  /* call it */
++          luaD_precall(L, ra, LUA_MULTRET);  /* call it */
+           updatetrap(ci);
+           updatestack(ci);  /* stack may have been relocated */
+-          ci->func -= delta;
+-          luaD_poscall(L, ci, cast_int(L->top - ra));
+-          return;
++          ci->func -= delta;  /* restore 'func' (if vararg) */
++          luaD_poscall(L, ci, cast_int(L->top - ra));  /* finish caller */
++          updatetrap(ci);  /* 'luaD_poscall' can change hooks */
++          goto ret;  /* caller returns after the tail call */
+         }
+-        ci->func -= delta;
++        ci->func -= delta;  /* restore 'func' (if vararg) */
+         luaD_pretailcall(L, ci, ra, b);  /* prepare call frame */
+-        goto tailcall;
++        goto startfunc;  /* execute the callee */
+       }
+       vmcase(OP_RETURN) {
+         int n = GETARG_B(i) - 1;  /* number of results */
+@@ -1671,12 +1704,15 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
+           ci->func -= ci->u.l.nextraargs + nparams1;
+         L->top = ra + n;  /* set call for 'luaD_poscall' */
+         luaD_poscall(L, ci, n);
+-        return;
++        updatetrap(ci);  /* 'luaD_poscall' can change hooks */
++        goto ret;
+       }
+       vmcase(OP_RETURN0) {
+         if (L->hookmask) {
+           L->top = ra;
+-          halfProtectNT(luaD_poscall(L, ci, 0));  /* no hurry... */
++          savepc(ci);
++          luaD_poscall(L, ci, 0);  /* no hurry... */
++          trap = 1;
+         }
+         else {  /* do the 'poscall' here */
+           int nres = ci->nresults;
+@@ -1685,12 +1721,14 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
+           while (nres-- > 0)
+             setnilvalue(s2v(L->top++));  /* all results are nil */
+         }
+-        return;
++        goto ret;
+       }
+       vmcase(OP_RETURN1) {
+         if (L->hookmask) {
+           L->top = ra + 1;
+-          halfProtectNT(luaD_poscall(L, ci, 1));  /* no hurry... */
++          savepc(ci);
++          luaD_poscall(L, ci, 1);  /* no hurry... */
++          trap = 1;
+         }
+         else {  /* do the 'poscall' here */
+           int nres = ci->nresults;
+@@ -1704,7 +1742,13 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
+               setnilvalue(s2v(L->top++));
+           }
+         }
+-        return;
++       ret:  /* return from a Lua function */
++        if (ci->callstatus & CIST_FRESH)
++          return;  /* end this frame */
++        else {
++          ci = ci->previous;
++          goto returning;  /* continue running caller in this frame */
++        }
+       }
+       vmcase(OP_FORLOOP) {
+         if (ttisinteger(s2v(ra + 2))) {  /* integer loop? */
+diff --git a/lvm.h b/lvm.h
+index 2d4ac160..640dcc8d 100644
+--- a/lvm.h
++++ b/lvm.h
+@@ -103,8 +103,11 @@ typedef enum {
+ ** Finish a fast set operation (when fast get succeeds). In that case,
+ ** 'slot' points to the place to put the value.
+ */
++/* Cranked: a table whose metatable has a true __floatfields field (geometry objects) stores
++** integers as floats, as the device's float fields do */
+ #define luaV_finishfastset(L,t,slot,v) \
+-    { setobj2t(L, cast(TValue *,slot), v); \
++    { if (unlikely(hvalue(t)->floatints)) luaV_setfloatint(L, cast(TValue *,slot), v); \
++      else { setobj2t(L, cast(TValue *,slot), v); } \
+       luaC_barrierback(L, gcvalue(t), v); }
+ 
+ 
+@@ -120,6 +123,8 @@ LUAI_FUNC int luaV_tointegerns (const TValue *obj, lua_Integer *p,
+ LUAI_FUNC int luaV_flttointeger (lua_Number n, lua_Integer *p, F2Imod mode);
+ LUAI_FUNC void luaV_finishget (lua_State *L, const TValue *t, TValue *key,
+                                StkId val, const TValue *slot);
++/* Cranked: store into a __floatfields table: numbers and numeric strings become floats */
++LUAI_FUNC void luaV_setfloatint (lua_State *L, TValue *slot, const TValue *v);
+ LUAI_FUNC void luaV_finishset (lua_State *L, const TValue *t, TValue *key,
+                                TValue *val, const TValue *slot);
+ LUAI_FUNC void luaV_finishOp (lua_State *L);

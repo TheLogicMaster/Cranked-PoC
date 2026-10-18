@@ -1,0 +1,182 @@
+# Builds every Proof of Concept target. The SDK assets are prepared once on Linux (the SDK's pdc compiles them) and
+# shared with the other jobs. The web build is published to the gh-pages branch from the default branch.
+# Every job's output is uploaded or published, so the assets are prepared for distribution (SDK_ASSETS=fonts): only
+# the Playdate fonts (CC BY 4.0) come from the SDK, and its other assets are replaced by plain stand-ins.
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  SDK_URL: https://download.panic.com/playdate_sdk/Linux/PlaydateSDK-3.1.1.tar.gz
+  SDK_ASSETS: fonts
+
+jobs:
+  sdk-assets:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Playdate SDK 3.1.1 (for its assets)
+        run: |
+          curl -sSL "$SDK_URL" -o sdk.tar.gz
+          mkdir sdk && tar xzf sdk.tar.gz -C sdk --strip-components=1
+      - name: Prepare the assets
+        run: |
+          mkdir -p staging/core/resources
+          scripts/prepare-sdk-assets.sh --distributable "$PWD/sdk" "$PWD/staging"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdk-assets
+          path: staging/core/resources
+          include-hidden-files: true # .sdk-assets, which tells build.sh how the assets were prepared
+          retention-days: 1
+
+  native:
+    needs: sdk-assets
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022, macos-15]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cranked at the pinned commit, patched
+        shell: bash
+        run: scripts/fetch-cranked.sh
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdk-assets
+          path: cranked/core/resources
+      - name: Linux packages
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ninja-build libgl-dev libx11-dev libxext-dev libasound2-dev libpulse-dev
+      - name: macOS packages
+        if: runner.os == 'macOS'
+        # Xcode 16 or later: the code uses C++20 parenthesized aggregate initialization, which Apple clang 15 lacks
+        run: |
+          brew install ninja
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_16*.app | sort -V | tail -1)"
+          clang++ --version
+      - name: MSVC
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+      - name: Build
+        run: scripts/build.sh desktop desktop-nojit libretro libretro-nojit
+      - name: AppImage (Linux)
+        if: runner.os == 'Linux'
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: 1
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -sSL -o "$RUNNER_TEMP/bin/appimagetool" https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x "$RUNNER_TEMP/bin/appimagetool"
+          PATH="$RUNNER_TEMP/bin:$PATH" scripts/package-linux.sh appimage
+      - name: App bundle (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p dist/packages
+          scripts/wrap-game.sh dist/desktop/cranked_desktop none dist/packages/Cranked.app
+          (cd dist/packages && zip -qry Cranked-PoC-macOS.zip Cranked.app && rm -rf Cranked.app)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cranked-poc-${{ runner.os }}
+          path: dist
+
+  flatpak:
+    needs: native
+    runs-on: ubuntu-24.04
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-24.08
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: cranked-poc-Linux
+          path: dist
+      - run: chmod +x dist/desktop/cranked_desktop
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: Cranked-PoC.flatpak
+          manifest-path: packaging/org.cranked.ProofOfConcept.yml
+          cache: false
+
+  web:
+    needs: sdk-assets
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cranked at the pinned commit, patched
+        shell: bash
+        run: scripts/fetch-cranked.sh
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdk-assets
+          path: cranked/core/resources
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 3.1.52
+      - name: Build
+        run: sudo apt-get install -y ninja-build && scripts/build.sh web
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cranked-poc-web
+          path: dist/web
+
+  android-libretro:
+    needs: sdk-assets
+    runs-on: ubuntu-24.04
+    continue-on-error: true # experimental
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cranked at the pinned commit, patched
+        shell: bash
+        run: scripts/fetch-cranked.sh
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdk-assets
+          path: cranked/core/resources
+      - name: Build the libretro core for Android (arm64, interpreter)
+        run: |
+          sudo apt-get install -y ninja-build
+          scripts/build.sh libretro-android
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cranked-poc-android-libretro
+          path: dist/libretro-android
+
+  pages:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: web
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: cranked-poc-web
+          path: web-build
+      - name: Playdate SDK 3.1.1 (to build its example games, which are BSD Zero Clause) and the ARM compiler
+        run: |
+          sudo apt-get update && sudo apt-get install -y gcc-arm-none-eabi libnewlib-arm-none-eabi
+          curl -sSL "$SDK_URL" -o sdk.tar.gz
+          mkdir sdk && tar xzf sdk.tar.gz -C sdk --strip-components=1
+      - name: The site (the web build, site.json, the freely licensed games in site/games.tsv, the SDK examples)
+        run: scripts/make-site.sh --sdk-examples "$PWD/sdk" web-build public
+      - uses: actions/upload-artifact@v4 # the finished site, to serve elsewhere or try locally
+        with:
+          name: cranked-poc-site
+          path: public
+      - uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: public
+          publish_branch: gh-pages
+          force_orphan: true

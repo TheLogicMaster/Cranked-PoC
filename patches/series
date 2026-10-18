@@ -1,0 +1,7 @@
+# patch                               directory it applies in (relative to cranked/)
+0001-core.patch                      .
+0002-front-ends.patch                .
+0003-build-and-test-runner.patch     .
+0004-submodule-ffi.patch             core/libs/ffi
+0004-submodule-lua54.patch           core/libs/lua54
+0004-submodule-unicorn.patch         core/libs/unicorn

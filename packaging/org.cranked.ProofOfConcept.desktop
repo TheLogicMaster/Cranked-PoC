@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Cranked (Proof of Concept)
+Comment=Playdate emulator (unsupported proof of concept)
+Exec=cranked_desktop %f
+Icon=org.cranked.ProofOfConcept
+Categories=Game;Emulator;
+Terminal=false
