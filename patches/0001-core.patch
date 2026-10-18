@@ -1888,7 +1888,7 @@ index 0000000..0e71cc7
 +
 +}
 diff --git a/core/Audio.cpp b/core/Audio.cpp
-index 20bc938..8d1ac6c 100644
+index 20bc938..377dc76 100644
 --- a/core/Audio.cpp
 +++ b/core/Audio.cpp
 @@ -1,5 +1,8 @@
@@ -1926,7 +1926,7 @@ index 20bc938..8d1ac6c 100644
 +    auto it = sources.find(source);
 +    if (it == sources.end()) return;
 +    if (rendering) { pendingReleases.emplace_back(source); return; } // a callback during the render: after the block
-+    if (source->playing) { // freed when it stops (see renderBlock)
++    if (source->sounding()) { // freed when it stops (see renderBlock)
 +        if (find(releaseWhenStopped.begin(), releaseWhenStopped.end(), source) == releaseWhenStopped.end())
 +            releaseWhenStopped.push_back(source);
 +        return;
@@ -3739,7 +3739,7 @@ index 20bc938..8d1ac6c 100644
 +        rendering = false;
 +        pendingReleases.clear();
 +        for (auto source : vector(releaseWhenStopped)) // the ones that stopped playing are freed now
-+            if (!source->playing) {
++            if (!source->sounding()) {
 +                std::erase(releaseWhenStopped, source);
 +                if (source->getRefCount() == 1) releaseIfOnlyInMainChannel(source);
 +            }
@@ -3849,7 +3849,7 @@ index 20bc938..8d1ac6c 100644
  
  void Audio::init() {
 diff --git a/core/Audio.hpp b/core/Audio.hpp
-index 9ebd051..b5c291f 100644
+index 9ebd051..f4092cc 100644
 --- a/core/Audio.hpp
 +++ b/core/Audio.hpp
 @@ -1,11 +1,24 @@
@@ -3877,11 +3877,15 @@ index 9ebd051..b5c291f 100644
      class Cranked;
  
      class Audio;
-@@ -54,20 +67,67 @@ namespace cranked {
+@@ -54,20 +67,71 @@ namespace cranked {
  
          ~SoundSource_32() override;
  
 +        void onSingleReference() override;
++
++        // still making sound, so kept while the game no longer holds it (an instrument plays while a voice does;
++        // a channel source never sounds on its own)
++        virtual bool sounding() const { return playing; }
 +
          virtual void sampleAudio(int16 *left, int16 *right, int length) = 0;
 +        // sources that render as on the device add a block in signed 8.24, with their own volumes, to
@@ -3945,7 +3949,7 @@ index 9ebd051..b5c291f 100644
      };
  
      struct SoundEffect_32 : NativeResource {
-@@ -83,6 +143,20 @@ namespace cranked {
+@@ -83,6 +147,20 @@ namespace cranked {
          float mixLevel = 1.0f;
          SynthSignalValueRef mixModulator{};
          cref_t userdata{};
@@ -3966,7 +3970,7 @@ index 9ebd051..b5c291f 100644
      };
  
      struct PDSynthSignalValue_32 : NativeResource {
-@@ -96,12 +170,16 @@ namespace cranked {
+@@ -96,12 +174,16 @@ namespace cranked {
  
          unordered_resource_set<SoundSource> sources{};
          unordered_resource_set<SoundEffect> effects{};
@@ -3984,7 +3988,7 @@ index 9ebd051..b5c291f 100644
      };
  
      struct SoundChannelSignal_32 : PDSynthSignalValue_32 {
-@@ -109,6 +187,11 @@ namespace cranked {
+@@ -109,6 +191,11 @@ namespace cranked {
  
          SoundChannel channel;
          const bool wet;
@@ -3996,7 +4000,7 @@ index 9ebd051..b5c291f 100644
      };
  
      struct AudioPlayerBase : SoundSource_32 {
-@@ -129,17 +212,71 @@ namespace cranked {
+@@ -129,17 +216,71 @@ namespace cranked {
  
      struct FilePlayer_32 : AudioPlayerBase {
          explicit FilePlayer_32(Cranked &cranked);
@@ -4071,7 +4075,7 @@ index 9ebd051..b5c291f 100644
      };
  
      struct SamplePlayer_32 : AudioPlayerBase {
-@@ -147,15 +284,35 @@ namespace cranked {
+@@ -147,15 +288,35 @@ namespace cranked {
  
          SamplePlayer copy();
  
@@ -4110,7 +4114,7 @@ index 9ebd051..b5c291f 100644
      };
  
      struct PDSynthSignal_32 : PDSynthSignalValue_32 {
-@@ -173,11 +330,12 @@ namespace cranked {
+@@ -173,11 +334,12 @@ namespace cranked {
          // virtual void handleNoteOff(bool stopped, int32_t offset) = 0; // Todo: Offset in frame?
  
          float offset{};
@@ -4124,7 +4128,7 @@ index 9ebd051..b5c291f 100644
  
          // float stepSignal(int32 &ioSamples, float &interframeValue) override {
          //     return 1; // Todo
-@@ -188,11 +346,43 @@ namespace cranked {
+@@ -188,11 +350,43 @@ namespace cranked {
          // void handleNoteOff(bool stopped, int32_t offset) override {}
  
          LFOType type;
@@ -4170,7 +4174,7 @@ index 9ebd051..b5c291f 100644
          cref_t func{};
          bool functionInterpolate{};
          cref_t functionUserdata{};
-@@ -204,14 +394,29 @@ namespace cranked {
+@@ -204,14 +398,29 @@ namespace cranked {
  
      struct PDSynthEnvelope_32 : PDSynthSignal_32 {
          explicit PDSynthEnvelope_32(Cranked &cranked, float attack = 0, float decay = 0, float sustain = 0, float release = 0);
@@ -4201,7 +4205,7 @@ index 9ebd051..b5c291f 100644
      };
  
      struct NoteEvent {
-@@ -224,11 +429,38 @@ namespace cranked {
+@@ -224,11 +433,38 @@ namespace cranked {
      struct PDSynth_32 : SoundSource_32 {
          explicit PDSynth_32(Cranked &cranked);
  
@@ -4245,7 +4249,7 @@ index 9ebd051..b5c291f 100644
          bool generatorStereo{};
          cref_t generatorUserdata{};
          cref_t generatorRenderFunc{};
-@@ -239,6 +471,15 @@ namespace cranked {
+@@ -239,6 +475,15 @@ namespace cranked {
          cref_t generatorCopyUserdataFunc{};
          AudioSampleRef sample{};
          uint32 sampleSustainStart{}, sampleSustainEnd{};
@@ -4261,7 +4265,7 @@ index 9ebd051..b5c291f 100644
          int waveTableLog2size{};
          int waveTableColumns{}, waveTableRows{};
          SynthEnvelopeRef envelope;
-@@ -247,10 +488,11 @@ namespace cranked {
+@@ -247,10 +492,11 @@ namespace cranked {
          SynthSignalValueRef amplitudeModulator{};
          multimap<uint32, NoteEvent> noteEvents{};
          float parameters[4]{};
@@ -4274,7 +4278,7 @@ index 9ebd051..b5c291f 100644
      };
  
      struct ControlSignal_32 : PDSynthSignal_32 {
-@@ -262,7 +504,21 @@ namespace cranked {
+@@ -262,7 +508,21 @@ namespace cranked {
          explicit ControlSignal_32(Cranked &cranked);
  
          multimap<int32, Event> events{};
@@ -4297,11 +4301,15 @@ index 9ebd051..b5c291f 100644
      };
  
      struct PDSynthInstrument_32 : SoundSource_32 {
-@@ -278,8 +534,14 @@ namespace cranked {
+@@ -278,8 +538,18 @@ namespace cranked {
  //    int countVoicesPlaying();
  
          unordered_resource_set<Synth> voices{};
 +        vector<Synth> voiceOrder; // voices in the order added (the device searches them in this order)
++        bool sounding() const override {
++            for (auto voice : voiceOrder) if (voice and voice->sounding()) return true;
++            return false;
++        }
 +        // the instrument renders its voices in its own channel, each with
 +        // its volume scaled by the instrument's for the block
 +        bool renderFixed(int32 *left, int32 *right, uint32 blockStart, int length) override;
@@ -4313,7 +4321,7 @@ index 9ebd051..b5c291f 100644
          float transposeHalfSteps{};
      };
  
-@@ -292,28 +554,164 @@ namespace cranked {
+@@ -292,28 +562,164 @@ namespace cranked {
  
          SynthInstrumentRef instrument{};
          bool muted{};
@@ -4482,7 +4490,7 @@ index 9ebd051..b5c291f 100644
  
          TwoPoleFilterType type{};
          float frequency{};
-@@ -326,34 +724,188 @@ namespace cranked {
+@@ -326,33 +732,187 @@ namespace cranked {
      struct OnePoleFilter_32 : SoundEffect_32 {
          explicit OnePoleFilter_32(Cranked &cranked);
  
@@ -4644,8 +4652,8 @@ index 9ebd051..b5c291f 100644
 +            int i = (int) (u >> 10), v = quarter[min(i, 16)];
 +            if ((u & 0x3FF) and i < 16) v = (int16) (v + (((quarter[i + 1] - v) * (int) (u & 0x3FF)) >> 10));
 +            return p & 0x8000 ? (int16) -v : v;
-         }
- 
++        }
++
 +        static uint16 ringmod(int32 *buf, int n, float mix, uint32 step, uint16 phase) {
 +            auto smmla = [](int32 a, int32 b, int32 acc) { return (int32) ((uint32) acc + (uint32) (int32) (((int64) a * b) >> 32)); };
 +            auto fixed28 = [](float v) { v = min(v, 7.0f); return !(v == v) ? 0 : v <= -8.0f ? INT32_MIN : (int32) (v * 268435456.0f); };
@@ -4667,14 +4675,13 @@ index 9ebd051..b5c291f 100644
 +                }
 +            }
 +            return (uint16) ((uint32) (int16) max(n, 0) * (uint32) (int16) step + phase);
-+        }
+         }
 +        uint16 phase16{};
 +        double phase{};
-+
+ 
          float frequency{};
          SynthSignalValueRef frequencyModulator{};
-     };
-@@ -361,76 +913,176 @@ namespace cranked {
+@@ -361,76 +921,177 @@ namespace cranked {
      struct DelayLine_32 : SoundEffect_32 {
          explicit DelayLine_32(Cranked &cranked, int length, bool stereo);
  
@@ -4695,7 +4702,7 @@ index 9ebd051..b5c291f 100644
 +            if (right and stereo and !dataR.empty()) mixBuffer(right, length, dataR, mix);
 +            position = (position + (size_t) length) % data.size();
 +            return true;
-         }
++        }
 +        void mixBuffer(int32 *buf, int n, vector<int32> &ring, float mix) const {
 +            auto smmla = [](int32 a, int32 b, int32 acc) { return (int32) ((uint32) acc + (uint32) (int32) (((int64) a * b) >> 32)); };
 +            auto sb28 = [](int32 v) { return (int32) ((uint32) v << 4) >> 4; };
@@ -4711,7 +4718,7 @@ index 9ebd051..b5c291f 100644
 +                buf[i] = (int32) ((uint32) smmla(r, wet, sb28(smmla(x, dry, 0))) << 4);
 +                ring[at] = fb > 0 ? (int32) ((uint32) smmla(r, fbQ, x >> 4) << 4) : x;
 +            }
-+        }
+         }
 +        size_t position{};
 +        uint32 silentFrames{};
  
@@ -4806,6 +4813,7 @@ index 9ebd051..b5c291f 100644
 +    // volume and pan). Rendering copies that block over the mix of the channel it is in (replacing it)
 +    struct ChannelSource_32 : SoundSource_32 {
 +        explicit ChannelSource_32(Cranked &cranked);
++        bool sounding() const override { return false; } // its sound is its channel's
 +        void sampleAudio(int16 *left, int16 *right, int length) override {}
 +        bool renderFixed(int32 *left, int32 *right, uint32 blockStart, int length) override;
 +        void copy(const int32 *left, const int32 *right, int length, bool active);
@@ -4864,7 +4872,7 @@ index 9ebd051..b5c291f 100644
          void sampleAudio(int16 *samples, int len);
  
          void reset();
-@@ -438,10 +1090,19 @@ namespace cranked {
+@@ -438,10 +1099,19 @@ namespace cranked {
          void init();
  
          // Todo: Change to take in pointer type as template param
@@ -4885,7 +4893,7 @@ index 9ebd051..b5c291f 100644
              return source;
          }
  
-@@ -454,7 +1115,7 @@ namespace cranked {
+@@ -454,7 +1124,7 @@ namespace cranked {
  
          SoundChannel allocateChannel() {
              auto channel = heap.construct<SoundChannel_32>(cranked);
@@ -4894,7 +4902,7 @@ index 9ebd051..b5c291f 100644
              return channel;
          }
  
-@@ -483,7 +1144,21 @@ namespace cranked {
+@@ -483,7 +1153,21 @@ namespace cranked {
          SoundChannelRef mainChannel;
          unordered_resource_set<SoundChannel> channels{};
  
@@ -12119,10 +12127,10 @@ index 9532019..5fda37f 100644
  
  }
 diff --git a/core/LuaRuntime.cpp b/core/LuaRuntime.cpp
-index ed6bee4..33782de 100644
+index ed6bee4..830896b 100644
 --- a/core/LuaRuntime.cpp
 +++ b/core/LuaRuntime.cpp
-@@ -1,28 +1,47 @@
+@@ -1,28 +1,62 @@
 +#include <cfloat> // FLT_MAX for the JSON encoder
  #include "LuaRuntime.hpp"
 +#include "JsonDecoder.hpp"
@@ -12163,6 +12171,21 @@ index ed6bee4..33782de 100644
 +            auto L = cranked->getLuaContext();
 +            int top = lua_gettop(L);
 +            luaL_loadbuffer(L, (char *) file.data.data(), file.data.size(), file.name.c_str());
++            // measured: the module runs in the importing code's environment (playdate.file.run with an env table
++            // runs the file's imports in that table too). The caller's _ENV is its first upvalue when it is a main
++            // chunk; otherwise it is looked up by name (stripped code has none, and the globals stay)
++            lua_Debug ar;
++            if (lua_getstack(L, 1, &ar) and lua_getinfo(L, "fS", &ar)) {
++                bool found = false;
++                if (ar.what and !strcmp(ar.what, "main") and lua_getupvalue(L, -1, 1)) found = true;
++                else for (int i = 1; !found; i++) {
++                    const char *upName = lua_getupvalue(L, -1, i);
++                    if (!upName) break;
++                    if (!strcmp(upName, "_ENV")) found = true; else lua_pop(L, 1);
++                }
++                if (found) { lua_setupvalue(L, -3, 1); }
++                lua_pop(L, 1); // the caller
++            }
 +            cranked->luaEngine.loadedLuaFiles.emplace(name); // before running, so an import cycle does not repeat it
 +            if (lua_pcall(L, 0, LUA_MULTRET, 0) != LUA_OK) {
 +                luaL_error(L, "Failed to load module `%s`: %s", rawName, lua_tostring(L, -1));
@@ -12179,7 +12202,7 @@ index ed6bee4..33782de 100644
      return 1;
  }
  
-@@ -31,14 +50,20 @@ static LuaRet table_create_lua(lua_State *context, int arrayCount, int hashCount
+@@ -31,14 +65,20 @@ static LuaRet table_create_lua(lua_State *context, int arrayCount, int hashCount
      return 1;
  }
  
@@ -12203,7 +12226,7 @@ index ed6bee4..33782de 100644
  }
  
  static void playdate_stop_lua(Cranked *cranked) {
-@@ -49,8 +74,8 @@ static void playdate_start_lua(Cranked *cranked) {
+@@ -49,8 +89,8 @@ static void playdate_start_lua(Cranked *cranked) {
      cranked->disableUpdateLoop = false;
  }
  
@@ -12214,7 +12237,7 @@ index ed6bee4..33782de 100644
  }
  
  static int playdate_getSystemLanguage_lua(Cranked *cranked) {
-@@ -58,13 +83,16 @@ static int playdate_getSystemLanguage_lua(Cranked *cranked) {
+@@ -58,13 +98,16 @@ static int playdate_getSystemLanguage_lua(Cranked *cranked) {
  }
  
  static LuaRet playdate_getCrankChange_lua(Cranked *cranked) {
@@ -12234,7 +12257,7 @@ index ed6bee4..33782de 100644
      float change = cranked->getCrankChange();
      return (int)(change / (float)ticksPerRevolution);
  }
-@@ -74,6 +102,11 @@ static void playdate_setCrankSoundsDisabled_lua(Cranked *cranked, bool disabled)
+@@ -74,6 +117,11 @@ static void playdate_setCrankSoundsDisabled_lua(Cranked *cranked, bool disabled)
  }
  
  static LuaRet playdate_readAccelerometer_lua(Cranked *cranked) {
@@ -12246,7 +12269,7 @@ index ed6bee4..33782de 100644
      pushFloat(cranked, cranked->accelerometerX);
      pushFloat(cranked, cranked->accelerometerY);
      pushFloat(cranked, cranked->accelerometerZ);
-@@ -162,6 +195,11 @@ static LuaRet playdate_file_listFiles_lua(lua_State *context, const char *path,
+@@ -162,6 +210,11 @@ static LuaRet playdate_file_listFiles_lua(lua_State *context, const char *path,
      return 1;
  }
  
@@ -12258,18 +12281,25 @@ index ed6bee4..33782de 100644
  static bool playdate_file_delete_lua(Cranked *context, const char *path, bool recursive) {
      if (!path)
          throw CrankedError("Nil path");
-@@ -208,8 +246,8 @@ static void playdate_file_close_lua(lua_State *context, File file) {
+@@ -208,8 +261,15 @@ static void playdate_file_close_lua(lua_State *context, File file) {
      Cranked::fromLuaContext(context)->files.close(file);
  }
  
 -static LuaRet playdate_file_write_lua(Cranked *context, File file, const char *string) {
 -    auto result = context->files.write(file, (void *) string, (int) strlen(string));
++// measured: a file object that is collected is closed (the Simulator keeps no handle open), and then freed
++static void playdate_file_gc_lua(lua_State *context, File file) {
++    auto cranked = Cranked::fromLuaContext(context);
++    if (cranked->files.isFileOpen(file)) cranked->files.close(file);
++    file->dereference();
++}
++
 +static LuaRet fileWriteBytes(Cranked *context, File file, const char *data, size_t length) {
 +    auto result = context->files.write(file, (void *) data, (int) length);
      if (result < 0) {
          lua_pushinteger(context->getLuaContext(), 0);
          lua_pushstring(context->getLuaContext(), context->fromVirtualAddress<const char>(context->files.lastError));
-@@ -219,9 +257,25 @@ static LuaRet playdate_file_write_lua(Cranked *context, File file, const char *s
+@@ -219,9 +279,25 @@ static LuaRet playdate_file_write_lua(Cranked *context, File file, const char *s
      return 1;
  }
  
@@ -12297,7 +12327,7 @@ index ed6bee4..33782de 100644
      if (result < 0) {
          lua_pushnil(context->getLuaContext());
          lua_pushstring(context->getLuaContext(), context->fromVirtualAddress<const char>(context->files.lastError));
-@@ -233,11 +287,22 @@ static LuaRet playdate_file_read_lua(Cranked *context, File file, int bytes) {
+@@ -233,11 +309,22 @@ static LuaRet playdate_file_read_lua(Cranked *context, File file, int bytes) {
  }
  
  static LuaRet playdate_file_readline_lua(lua_State *context, File file) {
@@ -12325,7 +12355,7 @@ index ed6bee4..33782de 100644
      return 1;
  }
  
-@@ -249,96 +314,286 @@ static void playdate_file_seek_lua(Cranked *context, File file, int offset, Seek
+@@ -249,96 +336,286 @@ static void playdate_file_seek_lua(Cranked *context, File file, int offset, Seek
      context->files.seek(file, offset, whence);
  }
  
@@ -12688,7 +12718,7 @@ index ed6bee4..33782de 100644
  }
  
  static string *json_encode_lua(lua_State *context, LuaVal table) {
-@@ -358,7 +613,7 @@ static void json_encodeToFile_lua(lua_State *context, LuaVal file, LuaVal pretty
+@@ -358,7 +635,7 @@ static void json_encodeToFile_lua(lua_State *context, LuaVal file, LuaVal pretty
      bool isFile = !file.isString();
      auto cranked = Cranked::fromLuaContext(context);
      File target = isFile ? file.asUserdataObject<File>() : cranked->files.open(file.asString(), FileOptions::Write);
@@ -12697,7 +12727,7 @@ index ed6bee4..33782de 100644
      if (!isFile)
          cranked->files.close(target); // Todo: Surely should use RAII here
  }
-@@ -368,19 +623,22 @@ static LuaRet json_null_tostring_lua(lua_State *context) {
+@@ -368,19 +645,22 @@ static LuaRet json_null_tostring_lua(lua_State *context) {
      return 1;
  }
  
@@ -12725,7 +12755,7 @@ index ed6bee4..33782de 100644
  }
  
  static LuaRet playdate_datastore_read_lua(Cranked *context, LuaVal filename) {
-@@ -390,9 +648,19 @@ static LuaRet playdate_datastore_read_lua(Cranked *context, LuaVal filename) {
+@@ -390,9 +670,19 @@ static LuaRet playdate_datastore_read_lua(Cranked *context, LuaVal filename) {
          lua_pushnil(context->getLuaContext());
          return 1;
      }
@@ -12746,7 +12776,7 @@ index ed6bee4..33782de 100644
      return 1;
  }
  
-@@ -403,44 +671,76 @@ static bool playdate_datastore_delete_lua(Cranked *context, LuaVal filename) {
+@@ -403,44 +693,76 @@ static bool playdate_datastore_delete_lua(Cranked *context, LuaVal filename) {
  }
  
  static void playdate_datastore_writeImage_lua(Cranked *cranked, Bitmap image, const char *path) {
@@ -12835,7 +12865,7 @@ index ed6bee4..33782de 100644
  }
  
  static void playdate_graphics_image_gc_lua(Cranked *cranked, Bitmap image) {
-@@ -463,13 +763,15 @@ static LuaRet playdate_graphics_image_index_lua(Cranked *cranked, Bitmap image,
+@@ -463,13 +785,15 @@ static LuaRet playdate_graphics_image_index_lua(Cranked *cranked, Bitmap image,
      return 1;
  }
  
@@ -12852,7 +12882,7 @@ index ed6bee4..33782de 100644
          return 2;
      }
      lua_pushboolean(cranked->getLuaContext(), true);
-@@ -488,11 +790,16 @@ static LuaRet playdate_graphics_image_getSize_lua(Cranked *cranked, Bitmap image
+@@ -488,11 +812,16 @@ static LuaRet playdate_graphics_image_getSize_lua(Cranked *cranked, Bitmap image
  }
  
  static LuaRet playdate_graphics_imageSizeAtPath_lua(Cranked *cranked, const char *path) {
@@ -12874,7 +12904,7 @@ index ed6bee4..33782de 100644
  }
  
  static void playdate_graphics_image_draw_lua(Cranked *cranked, Bitmap image, LuaVal arg1) {
-@@ -500,21 +807,29 @@ static void playdate_graphics_image_draw_lua(Cranked *cranked, Bitmap image, Lua
+@@ -500,21 +829,29 @@ static void playdate_graphics_image_draw_lua(Cranked *cranked, Bitmap image, Lua
      LCDBitmapFlip flip{};
      optional<IntRect> sourceRect;
      LuaVal flipVal(cranked->getLuaContext(), arg1 + 1);
@@ -12910,7 +12940,7 @@ index ed6bee4..33782de 100644
      }
      cranked->graphics.drawBitmap(image, x, y, flip, false, sourceRect);
  }
-@@ -522,25 +837,32 @@ static void playdate_graphics_image_draw_lua(Cranked *cranked, Bitmap image, Lua
+@@ -522,25 +859,32 @@ static void playdate_graphics_image_draw_lua(Cranked *cranked, Bitmap image, Lua
  static void playdate_graphics_image_drawIgnoringOffset_lua(Cranked *cranked, Bitmap image, LuaVal x, LuaVal y, LuaVal flip) {
      int drawX, drawY;
      LCDBitmapFlip flipped{};
@@ -12950,7 +12980,7 @@ index ed6bee4..33782de 100644
  }
  
  static tuple<float, float> getArgScaleXY(LuaVal scale, LuaVal yScale) {
-@@ -549,14 +871,16 @@ static tuple<float, float> getArgScaleXY(LuaVal scale, LuaVal yScale) {
+@@ -549,14 +893,16 @@ static tuple<float, float> getArgScaleXY(LuaVal scale, LuaVal yScale) {
      return { scaleX, scaleY };
  }
  
@@ -12970,7 +13000,7 @@ index ed6bee4..33782de 100644
  }
  
  static void playdate_graphics_image_drawScaled_lua(Cranked *cranked, Bitmap image, int x, int y, float scale, LuaVal yScale) {
-@@ -569,7 +893,8 @@ static LuaValRet playdate_graphics_image_scaledImage_lua(Cranked *cranked, Bitma
+@@ -569,7 +915,8 @@ static LuaValRet playdate_graphics_image_scaledImage_lua(Cranked *cranked, Bitma
      return pushResource(cranked, cranked->graphics.scaleBitmap(image, scale, scaleY));
  }
  
@@ -12980,7 +13010,7 @@ index ed6bee4..33782de 100644
      cranked->graphics.drawTransformedBitmap(image, xform, x, y);
  }
  
-@@ -577,20 +902,26 @@ static LuaValRet playdate_graphics_image_transformedImage_lua(Cranked *cranked,
+@@ -577,20 +924,26 @@ static LuaValRet playdate_graphics_image_transformedImage_lua(Cranked *cranked,
      return pushResource(cranked, cranked->graphics.transformBitmap(image, xform));
  }
  
@@ -13012,7 +13042,7 @@ index ed6bee4..33782de 100644
  }
  
  static void playdate_graphics_image_removeMask_lua(Cranked *cranked, Bitmap image) {
-@@ -601,16 +932,22 @@ static bool playdate_graphics_image_hasMask_lua(Cranked *cranked, Bitmap image)
+@@ -601,16 +954,22 @@ static bool playdate_graphics_image_hasMask_lua(Cranked *cranked, Bitmap image)
      return image->mask;
  }
  
@@ -13039,7 +13069,7 @@ index ed6bee4..33782de 100644
          flip = (arg1 + 4).asFlip();
      } else {
          rect = arg1.asIntRect();
-@@ -619,25 +956,31 @@ static void playdate_graphics_image_drawTiled_lua(Cranked *cranked, Bitmap image
+@@ -619,25 +978,31 @@ static void playdate_graphics_image_drawTiled_lua(Cranked *cranked, Bitmap image
      cranked->graphics.drawBitmapTiled(image, rect.pos.x, rect.pos.y, rect.size.x, rect.size.y, flip);
  }
  
@@ -13050,22 +13080,22 @@ index ed6bee4..33782de 100644
      GraphicsFlip flip{};
      int phaseX{}, phaseY{};
 -    if (arg2.isNil())
--        flip = arg1.asFlip();
--    else if (arg3.isNil()) {
--        phaseX = arg1.asInt();
--        phaseY = arg2.asInt();
--    }
--    else {
 +    int top = lua_gettop(cranked->getLuaContext());
 +    if (top == 7)
          flip = arg1.asFlip();
--        phaseX = arg2.asInt();
--        phaseY = arg3.asInt();
+-    else if (arg3.isNil()) {
+-        phaseX = arg1.asInt();
+-        phaseY = arg2.asInt();
 +    else if (top >= 8) {
 +        phaseX = (int) arg1.asFloat();
 +        phaseY = (int) arg2.asFloat();
 +        if (top >= 9) flip = arg3.asFlip();
      }
+-    else {
+-        flip = arg1.asFlip();
+-        phaseX = arg2.asInt();
+-        phaseY = arg3.asInt();
+-    }
 -    cranked->graphics.drawBlurredBitmap(image, x, y, radius, numPasses, ditherType, flip, phaseX, phaseY);
 +    cranked->graphics.drawBlurredBitmap(image, x, y, (int) radius, numPasses, ditherType, flip, phaseX, phaseY);
  }
@@ -13084,7 +13114,7 @@ index ed6bee4..33782de 100644
  }
  
  static void playdate_graphics_image_setInverted_lua(Cranked *cranked, Bitmap image, bool flag) {
-@@ -653,12 +996,29 @@ static LuaValRet playdate_graphics_image_blendWithImage_lua(Cranked *cranked, Bi
+@@ -653,12 +1018,29 @@ static LuaValRet playdate_graphics_image_blendWithImage_lua(Cranked *cranked, Bi
      return pushResource(cranked, cranked->graphics.blendedBitmap(self, image, alpha, ditherType));
  }
  
@@ -13118,7 +13148,7 @@ index ed6bee4..33782de 100644
  }
  
  static LuaValRet playdate_graphics_image_vcrPauseFilterImage_lua(Cranked *cranked, Bitmap image) {
-@@ -671,7 +1031,24 @@ static void playdate_graphics_pushContext_lua(Cranked *cranked, LuaVal imageVal)
+@@ -671,7 +1053,24 @@ static void playdate_graphics_pushContext_lua(Cranked *cranked, LuaVal imageVal)
  }
  
  static void playdate_graphics_clear_lua(Cranked *cranked, LuaVal color) {
@@ -13144,7 +13174,7 @@ index ed6bee4..33782de 100644
  }
  
  static bool playdate_graphics_checkAlphaCollision_lua(Cranked *cranked, Bitmap image1, int x1, int y1, GraphicsFlip flip1, Bitmap image2, int x2, int y2, GraphicsFlip flip2) {
-@@ -684,47 +1061,89 @@ static void playdate_graphics_setColor_lua(Cranked *cranked, LCDSolidColor color
+@@ -684,47 +1083,89 @@ static void playdate_graphics_setColor_lua(Cranked *cranked, LCDSolidColor color
      ctx.drawingColor = color;
  }
  
@@ -13254,7 +13284,7 @@ index ed6bee4..33782de 100644
  }
  
  static void playdate_graphics_drawPixel_lua(Cranked *cranked, LuaVal x, int y) {
-@@ -734,12 +1153,56 @@ static void playdate_graphics_drawPixel_lua(Cranked *cranked, LuaVal x, int y) {
+@@ -734,12 +1175,56 @@ static void playdate_graphics_drawPixel_lua(Cranked *cranked, LuaVal x, int y) {
          cranked->graphics.drawPixel(x.asInt(), y, cranked->graphics.getContext().color);
  }
  
@@ -13316,7 +13346,7 @@ index ed6bee4..33782de 100644
  }
  
  static void playdate_graphics_fillRect_lua(Cranked *cranked, LuaVal x, int y, int w, int h) {
-@@ -767,17 +1230,35 @@ static void playdate_graphics_fillRoundRect_lua(Cranked *cranked, LuaVal x, int
+@@ -767,17 +1252,35 @@ static void playdate_graphics_fillRoundRect_lua(Cranked *cranked, LuaVal x, int
  }
  
  static void drawEllipse(Cranked *cranked, LuaVal arg1, bool filled) {
@@ -13361,7 +13391,7 @@ index ed6bee4..33782de 100644
  }
  
  static void playdate_graphics_drawEllipseInRect_lua(Cranked *cranked, LuaVal arg1) {
-@@ -788,7 +1269,7 @@ static void playdate_graphics_fillEllipseInRect_lua(Cranked *cranked, LuaVal arg
+@@ -788,7 +1291,7 @@ static void playdate_graphics_fillEllipseInRect_lua(Cranked *cranked, LuaVal arg
      drawEllipse(cranked, arg1, true);
  }
  
@@ -13370,7 +13400,7 @@ index ed6bee4..33782de 100644
      auto context = cranked->getLuaContext();
      if (!context)
          return {};
-@@ -800,20 +1281,59 @@ static vector<int32> getPolygonPoints(Cranked *cranked, LuaVal arg) {
+@@ -800,20 +1303,59 @@ static vector<int32> getPolygonPoints(Cranked *cranked, LuaVal arg) {
              points.emplace_back(point.val.getIntField("x"));
              points.emplace_back(point.val.getIntField("y"));
          }
@@ -13433,7 +13463,7 @@ index ed6bee4..33782de 100644
      auto points = getPolygonPoints(cranked, arg1);
      auto &ctx = cranked->graphics.getContext();
      cranked->graphics.fillPolygon(points.data(), (int)points.size() / 2, ctx.color, ctx.polygonFillRule);
-@@ -832,10 +1352,16 @@ static void playdate_graphics_fillTriangle_lua(Cranked *cranked, int x1, int y1,
+@@ -832,10 +1374,16 @@ static void playdate_graphics_fillTriangle_lua(Cranked *cranked, int x1, int y1,
  }
  
  static float playdate_graphics_perlin_lua(Cranked *cranked, float x, float y, float z, int repeat, int octaves, float persistence) {
@@ -13451,7 +13481,7 @@ index ed6bee4..33782de 100644
      auto table = pushTable(cranked);
      for (int i = 0; i < count; i++) {
          table.setFloatElement(i + 1, Perlin::noise(repeat, x, y, z, octaves, persistence));
-@@ -847,36 +1373,99 @@ static LuaValRet playdate_graphics_perlinArray_lua(Cranked *cranked, int count,
+@@ -847,36 +1395,99 @@ static LuaValRet playdate_graphics_perlinArray_lua(Cranked *cranked, int count,
  }
  
  static void playdate_graphics_setClipRect_lua(Cranked *cranked, LuaVal arg1, int y, int width, int height) {
@@ -13561,7 +13591,7 @@ index ed6bee4..33782de 100644
  }
  
  static void playdate_graphics_clearStencil_lua(Cranked *cranked) {
-@@ -884,106 +1473,175 @@ static void playdate_graphics_clearStencil_lua(Cranked *cranked) {
+@@ -884,106 +1495,175 @@ static void playdate_graphics_clearStencil_lua(Cranked *cranked) {
  }
  
  static void playdate_graphics_setDrawMode_lua(Cranked *cranked, BitmapDrawMode drawMode) {
@@ -13739,6 +13769,10 @@ index ed6bee4..33782de 100644
 -    return 2;
 +static LuaRet playdate_epochFromTime_lua(Cranked *cranked) {
 +    return epochFromTable(cranked, -cranked->timezoneOffset * 60);
++}
++
++static LuaRet playdate_epochFromGMTTime_lua(Cranked *cranked) {
++    return epochFromTable(cranked, 0);
  }
  
 -static LuaRet playdate_timeFromEpoch_lua(Cranked *cranked, int seconds, int milliseconds) {
@@ -13746,10 +13780,6 @@ index ed6bee4..33782de 100644
 -    time += chrono::seconds(seconds);
 -    time += chrono::milliseconds(milliseconds);
 -    pushTime(cranked, time + chrono::hours(cranked->timezoneOffset));
-+static LuaRet playdate_epochFromGMTTime_lua(Cranked *cranked) {
-+    return epochFromTable(cranked, 0);
-+}
-+
 +// as on the device: both arguments are required integers; the milliseconds go through microseconds (an int)
 +static LuaRet playdate_timeFromEpoch_lua(Cranked *cranked) {
 +    auto L = cranked->getLuaContext();
@@ -13778,7 +13808,7 @@ index ed6bee4..33782de 100644
  }
  
  static LuaRet playdate_getStats_lua(Cranked *cranked) {
-@@ -1004,17 +1662,21 @@ static void playdate_setStatsInterval_lua(Cranked *cranked, int seconds) {
+@@ -1004,17 +1684,21 @@ static void playdate_setStatsInterval_lua(Cranked *cranked, int seconds) {
      cranked->statsInterval = seconds;
  }
  
@@ -13804,7 +13834,7 @@ index ed6bee4..33782de 100644
      if (!cranked->luaEngine.getQualifiedLuaGlobal("playdate.menu"))
          throw CrankedError("Playdate menu table missing");
      lua_setmetatable(cranked->getLuaContext(), -2);
-@@ -1022,10 +1684,18 @@ static LuaRet playdate_getSystemMenu_lua(Cranked *cranked) {
+@@ -1022,10 +1706,67 @@ static LuaRet playdate_getSystemMenu_lua(Cranked *cranked) {
  }
  
  static void playdate_setMenuImage_lua(Cranked *cranked, LuaVal image, int xOffset) {
@@ -13817,14 +13847,63 @@ index ed6bee4..33782de 100644
      cranked->menu.setImage(bitmap, xOffset);
  }
  
++// Measured (tests/probes/gckeep): a channel made in Lua stays alive while it is in the mix, with the effects added to
++// it, even when the game keeps no reference; channel:remove() lets it be collected. Lua keeps the channel in registry
++// crankedChannels[channel], and a channel's effects in crankedChannelEffects[channel][effect] (weak keys, so the
++// entry goes when the channel is collected).
++static void registryTable(lua_State *L, const char *name, const char *mode) {
++    lua_getfield(L, LUA_REGISTRYINDEX, name);
++    if (!lua_isnil(L, -1)) return;
++    lua_pop(L, 1);
++    lua_newtable(L);
++    if (mode) { lua_newtable(L); lua_pushstring(L, mode); lua_setfield(L, -2, "__mode"); lua_setmetatable(L, -2); }
++    lua_pushvalue(L, -1);
++    lua_setfield(L, LUA_REGISTRYINDEX, name);
++}
++
++static void keepChannelValue(Cranked *cranked, int index, bool keep) {
++    lua_State *L = cranked->getLuaContext();
++    if (!L or lua_type(L, index) != LUA_TUSERDATA) return;
++    index = lua_absindex(L, index);
++    registryTable(L, "crankedChannels", nullptr);
++    lua_pushvalue(L, index);
++    if (keep) lua_pushboolean(L, 1); else lua_pushnil(L);
++    lua_settable(L, -3);
++    lua_pop(L, 1);
++}
++
++static void keepChannelEffect(Cranked *cranked, bool keep) { // the channel at stack index 1, the effect at 2
++    lua_State *L = cranked->getLuaContext();
++    if (!L or lua_type(L, 1) != LUA_TUSERDATA or lua_type(L, 2) != LUA_TUSERDATA) return;
++    registryTable(L, "crankedChannelEffects", "k");
++    lua_pushvalue(L, 1);
++    lua_gettable(L, -2);
++    if (lua_isnil(L, -1)) {
++        lua_pop(L, 1);
++        if (!keep) { lua_pop(L, 1); return; }
++        lua_newtable(L);
++        lua_pushvalue(L, 1); lua_pushvalue(L, -2); lua_settable(L, -4);
++    }
++    lua_pushvalue(L, 2);
++    if (keep) lua_pushboolean(L, 1); else lua_pushnil(L);
++    lua_settable(L, -3);
++    lua_pop(L, 2);
++}
++
 +// measured: channel:addEffect and removeEffect return nothing
-+static void playdate_sound_channel_addEffect_lua(Cranked *cranked, SoundChannel channel, SoundEffect effect) { playdate_sound_channel_addEffect(cranked, channel, effect); }
-+static void playdate_sound_channel_removeEffect_lua(Cranked *cranked, SoundChannel channel, SoundEffect effect) { playdate_sound_channel_removeEffect(cranked, channel, effect); }
++static void playdate_sound_channel_addEffect_lua(Cranked *cranked, SoundChannel channel, SoundEffect effect) {
++    playdate_sound_channel_addEffect(cranked, channel, effect);
++    keepChannelEffect(cranked, true);
++}
++static void playdate_sound_channel_removeEffect_lua(Cranked *cranked, SoundChannel channel, SoundEffect effect) {
++    playdate_sound_channel_removeEffect(cranked, channel, effect);
++    keepChannelEffect(cranked, false);
++}
 +
  static LuaRet playdate_menu_addMenuItem_lua(Cranked *cranked, LuaVal menu, const char *title, LuaVal callback) {
      try {
          pushResource(cranked, cranked->menu.addItem(title, PDMenuItem_32::Type::Button, {}, 0, 0, callback));
-@@ -1034,7 +1704,8 @@ static LuaRet playdate_menu_addMenuItem_lua(Cranked *cranked, LuaVal menu, const
+@@ -1034,7 +1775,8 @@ static LuaRet playdate_menu_addMenuItem_lua(Cranked *cranked, LuaVal menu, const
          lua_pushstring(cranked->getLuaContext(), ex.what());
          return 2;
      }
@@ -13834,7 +13913,7 @@ index ed6bee4..33782de 100644
  }
  
  static LuaRet playdate_menu_addCheckmarkMenuItem_lua(Cranked *cranked, LuaVal menu, const char *title, LuaVal arg2, LuaVal arg3) {
-@@ -1052,18 +1723,23 @@ static LuaRet playdate_menu_addCheckmarkMenuItem_lua(Cranked *cranked, LuaVal me
+@@ -1052,18 +1794,23 @@ static LuaRet playdate_menu_addCheckmarkMenuItem_lua(Cranked *cranked, LuaVal me
          lua_pushstring(cranked->getLuaContext(), ex.what());
          return 2;
      }
@@ -13863,7 +13942,7 @@ index ed6bee4..33782de 100644
      }
      if (arg3.isString()) {
          auto value = arg3.asString();
-@@ -1082,7 +1758,8 @@ static LuaRet playdate_menu_addOptionsMenuItem_lua(Cranked *cranked, LuaVal menu
+@@ -1082,7 +1829,8 @@ static LuaRet playdate_menu_addOptionsMenuItem_lua(Cranked *cranked, LuaVal menu
          lua_pushstring(cranked->getLuaContext(), ex.what());
          return 2;
      }
@@ -13873,16 +13952,27 @@ index ed6bee4..33782de 100644
  }
  
  static LuaRet playdate_menu_getMenuItems_lua(Cranked *cranked, LuaVal menu) {
-@@ -1091,7 +1768,7 @@ static LuaRet playdate_menu_getMenuItems_lua(Cranked *cranked, LuaVal menu) {
+@@ -1091,13 +1839,18 @@ static LuaRet playdate_menu_getMenuItems_lua(Cranked *cranked, LuaVal menu) {
      for (auto &item : cranked->menu.items) {
          if (!item)
              continue;
 -        pushResource(cranked, item);
-+        cranked->luaEngine.pushNewResourceValue(item, false); // measured: new values
++        cranked->luaEngine.pushNewResourceValue(item, true); // measured: new values
          lua_seti(cranked->getLuaContext(), -2, i);
          i++;
      }
-@@ -1124,14 +1801,26 @@ static const char *playdate_menu_item_getTitle_lua(Cranked *cranked, MenuItem it
+     return 1;
+ }
+ 
++// the menu holds its items; a Lua value of an item holds a reference of its own
++static void playdate_menu_item_gc_lua(Cranked *cranked, MenuItem item) {
++    item->dereference();
++}
++
+ static void playdate_menu_removeMenuItem_lua(Cranked *cranked, LuaVal menu, MenuItem item) {
+     cranked->menu.removeItem(item);
+ }
+@@ -1124,14 +1877,26 @@ static const char *playdate_menu_item_getTitle_lua(Cranked *cranked, MenuItem it
  }
  
  static void playdate_menu_item_setValue_lua(Cranked *cranked, MenuItem item, LuaVal value) {
@@ -13916,7 +14006,7 @@ index ed6bee4..33782de 100644
  }
  
  static LuaRet playdate_menu_item_getValue_lua(Cranked *cranked, MenuItem item) {
-@@ -1143,18 +1832,29 @@ static LuaRet playdate_menu_item_getValue_lua(Cranked *cranked, MenuItem item) {
+@@ -1143,18 +1908,29 @@ static LuaRet playdate_menu_item_getValue_lua(Cranked *cranked, MenuItem item) {
          else
              lua_pushnil(cranked->getLuaContext()); // Todo: Is this right for invalid values?
      } else
@@ -13948,7 +14038,7 @@ index ed6bee4..33782de 100644
  }
  
  static LuaRet playdate_menu_item_index_lua(Cranked *cranked, MenuItem item, LuaVal keyArg) {
-@@ -1175,7 +1875,10 @@ static float playdate_display_getRefreshRate_lua(Cranked *cranked) {
+@@ -1175,7 +1951,10 @@ static float playdate_display_getRefreshRate_lua(Cranked *cranked) {
  }
  
  static LuaRet playdate_display_getSize_lua(Cranked *cranked) {
@@ -13960,7 +14050,7 @@ index ed6bee4..33782de 100644
  }
  
  static LuaValRet playdate_display_getRect_lua(Cranked *cranked) {
-@@ -1190,27 +1893,98 @@ static bool playdate_display_getInverted_lua(Cranked *cranked) {
+@@ -1190,37 +1969,131 @@ static bool playdate_display_getInverted_lua(Cranked *cranked) {
      return cranked->graphics.displayInverted;
  }
  
@@ -14004,13 +14094,15 @@ index ed6bee4..33782de 100644
 +    return returnValues(cranked, true);
  }
  
+-static LuaRet playdate_file_load_lua(Cranked *cranked, const char *path, LuaVal env) {
 +static float playdate_sound_getCurrentTime_lua(Cranked *cranked) { return (float) playdate_sound_getCurrentTime(cranked) / 44100.0f; }
 +
 +static void playdate_sound_channel_removeSource_lua(Cranked *cranked, SoundChannel channel, SoundSource source) { playdate_sound_channel_removeSource(cranked, channel, source); }
 +
 +static void playdate_file_flush_lua(Cranked *cranked, File file) { playdate_file_flush(cranked, file); }
 +
- static LuaRet playdate_file_load_lua(Cranked *cranked, const char *path, LuaVal env) {
++// file.load and file.run; only file.run accepts a .pdz holding more than the file's own chunk (see below)
++static LuaRet loadPdzChunk(Cranked *cranked, const char *path, LuaVal env, bool allowImports) {
      // Todo: Resolve data files?
      // Todo: Should be added to Rom pdz list for loading assets?
 -    luaL_loadfile(cranked->getLuaContext(), path);
@@ -14020,7 +14112,7 @@ index ed6bee4..33782de 100644
 +    // Decide now whether an environment was passed: the loaded function is pushed into the stack slot an
 +    // absent env argument would occupy, and must not be mistaken for it
 +    bool hasEnv = env.index <= lua_gettop(context) and !lua_isnil(context, env.index);
-+    bool missing = false;
++    bool missing = false, tooMany = false;
 +    try {
 +        auto files = Rom::loadPDZ(cranked->rom->readRomFile(path, ".pdz"));
 +        // A .pdz holds the file's own chunk plus the modules it imports. Run the chunk named after the
@@ -14041,13 +14133,17 @@ index ed6bee4..33782de 100644
 +        if (chunk == files.end()) // otherwise the last chunk, which pdc writes after the imports
 +            for (auto it = files.begin(); it != files.end(); ++it) if (it->type == Rom::FileType::LUAC) chunk = it;
 +        if (chunk == files.end()) throw CrankedError("no Lua chunk");
-+        for (auto &f : files)
++        // measured (tests/probes/frunenv): file.load raises this error for a .pdz that holds imported modules too;
++        // file.run runs it
++        if (!allowImports and count_if(files.begin(), files.end(), [](auto &f) { return f.type == Rom::FileType::LUAC; }) > 1)
++            tooMany = true;
++        if (!tooMany) for (auto &f : files)
 +            if (f.type == Rom::FileType::LUAC and &f != &*chunk) {
 +                bool known = false;
 +                for (auto &existing : cranked->rom->pdzFiles) known |= canonical(existing.name) == canonical(f.name);
 +                if (!known) cranked->rom->pdzFiles.push_back(f);
 +            }
-+        if (luaL_loadbuffer(context, (char *) chunk->data.data(), chunk->data.size(), path) != LUA_OK) {
++        if (!tooMany and luaL_loadbuffer(context, (char *) chunk->data.data(), chunk->data.size(), path) != LUA_OK) {
 +            pushNil(cranked); lua_insert(context, -2); return 2;
 +        }
 +    } catch (exception &ex) {
@@ -14063,19 +14159,26 @@ index ed6bee4..33782de 100644
 +    if (missing) {
 +        return luaL_error(context, "file not found: %s.pdz", path); // with the calling line
 +    }
++    if (tooMany)
++        return luaL_error(context, "pdz files loaded with file.load() can only contain one segment (i.e., no imports)");
 +    if (hasEnv) {
          lua_pushvalue(cranked->getLuaContext(), env);
          lua_setupvalue(cranked->getLuaContext(), -2, 1);
      }
-@@ -1218,9 +1992,21 @@ static LuaRet playdate_file_load_lua(Cranked *cranked, const char *path, LuaVal
+     return 1;
  }
  
++static LuaRet playdate_file_load_lua(Cranked *cranked, const char *path, LuaVal env) {
++    return loadPdzChunk(cranked, path, env, false);
++}
++
  static LuaRet playdate_file_run_lua(Cranked *cranked, const char *path, LuaVal env) {
-+    auto context = cranked->getLuaContext(); // return only the chunk's results
-+    int base = lua_gettop(context);
-     playdate_file_load_lua(cranked, path, env);
+-    playdate_file_load_lua(cranked, path, env);
 -    lua_call(cranked->getLuaContext(), 0, LUA_MULTRET);
 -    return lua_gettop(cranked->getLuaContext());
++    auto context = cranked->getLuaContext(); // return only the chunk's results
++    int base = lua_gettop(context);
++    loadPdzChunk(cranked, path, env, true);
 +    if (lua_gettop(context) - base != 1)
 +        return lua_gettop(context) - base; // nil and the message
 +    lua_call(context, 0, LUA_MULTRET);
@@ -14091,7 +14194,7 @@ index ed6bee4..33782de 100644
  }
  
  static LuaRet playdate_graphics_imagetable_new_lua(Cranked *cranked, LuaVal arg1, LuaVal arg2) {
-@@ -1228,18 +2014,22 @@ static LuaRet playdate_graphics_imagetable_new_lua(Cranked *cranked, LuaVal arg1
+@@ -1228,18 +2101,22 @@ static LuaRet playdate_graphics_imagetable_new_lua(Cranked *cranked, LuaVal arg1
          try {
              return returnValues(cranked, cranked->graphics.getBitmapTable(arg1.asString()));
          } catch (exception &ex) {
@@ -14119,7 +14222,7 @@ index ed6bee4..33782de 100644
  }
  
  static void playdate_graphics_imagetable_setImage_lua(Cranked *cranked, BitmapTable table, int n, Bitmap image) {
-@@ -1248,12 +2038,18 @@ static void playdate_graphics_imagetable_setImage_lua(Cranked *cranked, BitmapTa
+@@ -1248,12 +2125,18 @@ static void playdate_graphics_imagetable_setImage_lua(Cranked *cranked, BitmapTa
  }
  
  static LuaRet playdate_graphics_imagetable_load_lua(Cranked *cranked, BitmapTable table, const char *path) {
@@ -14140,7 +14243,7 @@ index ed6bee4..33782de 100644
      }
  }
  
-@@ -1262,7 +2058,10 @@ static int playdate_graphics_imagetable_getLength_lua(Cranked *cranked, BitmapTa
+@@ -1262,7 +2145,10 @@ static int playdate_graphics_imagetable_getLength_lua(Cranked *cranked, BitmapTa
  }
  
  static LuaRet playdate_graphics_imagetable_getSize_lua(Cranked *cranked, BitmapTable table) {
@@ -14152,7 +14255,7 @@ index ed6bee4..33782de 100644
  }
  
  static void playdate_graphics_imagetable_drawImage_lua(Cranked *cranked, BitmapTable table, int n, int x, int y, GraphicsFlip flip) {
-@@ -1284,7 +2083,11 @@ static LuaRet playdate_graphics_imagetable_index_lua(Cranked *cranked, BitmapTab
+@@ -1284,7 +2170,11 @@ static LuaRet playdate_graphics_imagetable_index_lua(Cranked *cranked, BitmapTab
      return 1;
  }
  
@@ -14165,7 +14268,7 @@ index ed6bee4..33782de 100644
      if (n > 0 and n <= table->bitmaps.size())
          table->bitmaps[n - 1] = image;
  }
-@@ -1298,30 +2101,57 @@ static void playdate_graphics_tilemap_gc_lua(Cranked *cranked, TileMap tilemap)
+@@ -1298,30 +2188,57 @@ static void playdate_graphics_tilemap_gc_lua(Cranked *cranked, TileMap tilemap)
  }
  
  static void playdate_graphics_tilemap_setImageTable_lua(Cranked *cranked, TileMap tilemap, BitmapTable table) {
@@ -14236,7 +14339,7 @@ index ed6bee4..33782de 100644
      optional<IntRect> rect;
      if (sourceRect.isTable())
          rect = sourceRect.asIntRect();
-@@ -1330,97 +2160,233 @@ static void playdate_graphics_tilemap_draw_lua(Cranked *cranked, TileMap tilemap
+@@ -1330,97 +2247,233 @@ static void playdate_graphics_tilemap_draw_lua(Cranked *cranked, TileMap tilemap
      cranked->graphics.drawTileMap(tilemap, x, y, false, rect);
  }
  
@@ -14502,7 +14605,7 @@ index ed6bee4..33782de 100644
      auto &ctx = cranked->graphics.getContext();
      int offset;
      IntVec2 pos;
-@@ -1431,64 +2397,122 @@ static void playdate_graphics_drawText_lua(Cranked *cranked, const char *text, L
+@@ -1431,64 +2484,122 @@ static void playdate_graphics_drawText_lua(Cranked *cranked, const char *text, L
          size = rect.size;
          offset = 1;
      } else {
@@ -14544,8 +14647,9 @@ index ed6bee4..33782de 100644
 +    pushInt(cranked, measured.x);
 +    pushInt(cranked, measured.y);
 +    return 2;
-+}
-+
+ }
+ 
+-static void playdate_graphics_drawLocalizedText_lua(Cranked *cranked, const char *key, LuaVal arg2) {
 +// Measured in the Simulator: Japanese only for kLanguageJapanese (or "jp"), the system
 +// language for nil, and English for anything else (another number, "en", a table)
 +static PDLanguage localizedLanguage(Cranked *cranked, LuaVal language) {
@@ -14556,9 +14660,8 @@ index ed6bee4..33782de 100644
 +    if (language.isNumeric() and language.asInt() == (int) PDLanguage::Japanese)
 +        return PDLanguage::Japanese;
 +    return PDLanguage::English;
- }
- 
--static void playdate_graphics_drawLocalizedText_lua(Cranked *cranked, const char *key, LuaVal arg2) {
++}
++
 +static LuaRet playdate_graphics_drawLocalizedText_lua(Cranked *cranked, const char *key, LuaVal arg2) {
 +    // Measured: (key, x, y, [language], [leadingAdjustment]) or (key, rect, ...) with only the rect's
 +    // position used; draws in the current font like drawText and returns the drawn width and height, or a single nil
@@ -14605,9 +14708,10 @@ index ed6bee4..33782de 100644
 +    pushInt(cranked, measured.x);
 +    pushInt(cranked, measured.y);
 +    return 2;
-+}
-+
-+static const char *playdate_graphics_getLocalizedText_lua(Cranked *cranked, const char *key, LuaVal language) {
+ }
+ 
+ static const char *playdate_graphics_getLocalizedText_lua(Cranked *cranked, const char *key, LuaVal language) {
+-    return cranked->graphics.getLocalizedText(key, not language.isNil() ? language.asLanguage() : cranked->systemLanguage);
 +    auto text = cranked->graphics.getLocalizedText(key, localizedLanguage(cranked, language));
 +    return text ? text : key; // a missing key returns the key itself
 +}
@@ -14631,10 +14735,8 @@ index ed6bee4..33782de 100644
 +
 +static void playdate_sound_signalvalue_gc_lua(Cranked *cranked, SynthSignalValue value) {
 +    value->dereference(); // not in the device's metatable; it releases the reference taken when the value was pushed
- }
- 
--static const char *playdate_graphics_getLocalizedText_lua(Cranked *cranked, const char *key, LuaVal language) {
--    return cranked->graphics.getLocalizedText(key, not language.isNil() ? language.asLanguage() : cranked->systemLanguage);
++}
++
 +// signals (custom signals) are referenced when pushed and released by __gc
 +static void playdate_sound_signal_gc_lua(Cranked *cranked, SynthSignal signal) {
 +    signal->dereference();
@@ -14659,7 +14761,7 @@ index ed6bee4..33782de 100644
      }
  }
  
-@@ -1517,20 +2541,26 @@ static LuaRet playdate_graphics_font_drawText_lua(Cranked *cranked, Font font, c
+@@ -1517,20 +2628,26 @@ static LuaRet playdate_graphics_font_drawText_lua(Cranked *cranked, Font font, c
          size = rect.size;
          offset = 1;
      } else {
@@ -14693,7 +14795,7 @@ index ed6bee4..33782de 100644
  }
  
  static int playdate_graphics_font_getHeight_lua(Cranked *cranked, Font font) {
-@@ -1538,11 +2568,17 @@ static int playdate_graphics_font_getHeight_lua(Cranked *cranked, Font font) {
+@@ -1538,11 +2655,17 @@ static int playdate_graphics_font_getHeight_lua(Cranked *cranked, Font font) {
  }
  
  static int playdate_graphics_font_getTextWidth_lua(Cranked *cranked, Font font, const char *text) {
@@ -14713,7 +14815,7 @@ index ed6bee4..33782de 100644
  }
  
  static int playdate_graphics_font_getTracking_lua(Cranked *cranked, Font font) {
-@@ -1557,20 +2593,49 @@ static int playdate_graphics_font_getLeading_lua(Cranked *cranked, Font font) {
+@@ -1557,20 +2680,49 @@ static int playdate_graphics_font_getLeading_lua(Cranked *cranked, Font font) {
      return font->leading;
  }
  
@@ -14768,7 +14870,7 @@ index ed6bee4..33782de 100644
          if (LuaValGuard metaTable(imageOrTilemap.getMetaTable()); not metaTable.val.isNil()) {
              if (auto str = metaTable.val.getStringField("__name")) {
                  if (string name = str; name == "playdate.graphics.tilemap")
-@@ -1589,25 +2654,44 @@ static void playdate_graphics_sprite_gc_lua(Cranked *cranked, Sprite sprite) {
+@@ -1589,25 +2741,44 @@ static void playdate_graphics_sprite_gc_lua(Cranked *cranked, Sprite sprite) {
      sprite->dereference();
  }
  
@@ -14824,7 +14926,7 @@ index ed6bee4..33782de 100644
      cranked->luaEngine.storeResourceValue(sprite, spriteVal);
      cranked->graphics.addSpriteToDrawList(sprite);
      sprite->updateLuaPosition();
-@@ -1615,7 +2699,7 @@ static void playdate_graphics_sprite_add_lua(Cranked *cranked, LuaVal spriteVal)
+@@ -1615,7 +2786,7 @@ static void playdate_graphics_sprite_add_lua(Cranked *cranked, LuaVal spriteVal)
  }
  
  static void playdate_graphics_sprite_remove_lua(Cranked *cranked, LuaVal spriteVal) {
@@ -14833,7 +14935,7 @@ index ed6bee4..33782de 100644
      cranked->graphics.removeSpriteFromDrawList(sprite);
      cranked->luaEngine.releaseLuaValue(spriteVal);
  }
-@@ -1640,8 +2724,25 @@ static LuaRet playdate_graphics_sprite_getSize_lua(Cranked *cranked, Sprite spri
+@@ -1640,8 +2811,25 @@ static LuaRet playdate_graphics_sprite_getSize_lua(Cranked *cranked, Sprite spri
      return returnVecValues(cranked, sprite->getSize());
  }
  
@@ -14859,7 +14961,7 @@ index ed6bee4..33782de 100644
  }
  
  static LuaRet playdate_graphics_sprite_getScale_lua(Cranked *cranked, Sprite sprite) {
-@@ -1649,21 +2750,64 @@ static LuaRet playdate_graphics_sprite_getScale_lua(Cranked *cranked, Sprite spr
+@@ -1649,21 +2837,64 @@ static LuaRet playdate_graphics_sprite_getScale_lua(Cranked *cranked, Sprite spr
  }
  
  static void playdate_graphics_sprite_setRotation_lua(Cranked *cranked, Sprite sprite, float angle, LuaVal scale, LuaVal yScale) {
@@ -14926,7 +15028,7 @@ index ed6bee4..33782de 100644
      sprite->flip = flip;
      sprite->collideRectFlip = flipCollideRect ? flip : GraphicsFlip::Unflipped;
  }
-@@ -1692,10 +2836,10 @@ static void playdate_graphics_sprite_setTilemap_lua(Cranked *cranked, Sprite spr
+@@ -1692,10 +2923,10 @@ static void playdate_graphics_sprite_setTilemap_lua(Cranked *cranked, Sprite spr
  }
  
  static void playdate_graphics_sprite_setClipRect_lua(Cranked *cranked, Sprite sprite, LuaVal arg1, LuaVal arg2, LuaVal arg3, LuaVal arg4) {
@@ -14941,7 +15043,7 @@ index ed6bee4..33782de 100644
  }
  
  static void playdate_graphics_sprite_setClipRectsInRange_lua(Cranked *cranked, LuaVal arg1, LuaVal arg2, LuaVal arg3, LuaVal arg4, LuaVal arg5, LuaVal arg6) {
-@@ -1708,10 +2852,20 @@ static void playdate_graphics_sprite_setClipRectsInRange_lua(Cranked *cranked, L
+@@ -1708,10 +2939,20 @@ static void playdate_graphics_sprite_setClipRectsInRange_lua(Cranked *cranked, L
  static void playdate_graphics_sprite_setStencilImage_lua(Cranked *cranked, Sprite sprite, Bitmap stencil, bool tile) {
      sprite->stencil = stencil;
      sprite->stencilTiled = tile;
@@ -14963,7 +15065,7 @@ index ed6bee4..33782de 100644
  }
  
  static bool playdate_graphics_sprite_getAlwaysRedraw_lua(Cranked *cranked) {
-@@ -1741,7 +2895,7 @@ static void playdate_graphics_sprite_removeSprites_lua(Cranked *cranked, LuaVal
+@@ -1741,7 +2982,7 @@ static void playdate_graphics_sprite_removeSprites_lua(Cranked *cranked, LuaVal
          auto value = spriteArray.getElement(i);
          if (value.val.isNil())
              break;
@@ -14972,7 +15074,7 @@ index ed6bee4..33782de 100644
      }
  }
  
-@@ -1782,17 +2936,44 @@ static LuaValRet playdate_graphics_sprite_allOverlappingSprites_lua(Cranked *cra
+@@ -1782,17 +3023,44 @@ static LuaValRet playdate_graphics_sprite_allOverlappingSprites_lua(Cranked *cra
  }
  
  static bool playdate_graphics_sprite_alphaCollision_lua(Cranked *cranked, Sprite sprite, Sprite anotherSprite) {
@@ -15021,7 +15123,7 @@ index ed6bee4..33782de 100644
          return false;
      });
      sprite->groupMask = mask;
-@@ -1800,8 +2981,13 @@ static void playdate_graphics_sprite_setGroups_lua(Cranked *cranked, Sprite spri
+@@ -1800,8 +3068,13 @@ static void playdate_graphics_sprite_setGroups_lua(Cranked *cranked, Sprite spri
  
  static void playdate_graphics_sprite_setCollidesWithGroups_lua(Cranked *cranked, Sprite sprite, LuaVal groups) {
      int mask = 0;
@@ -15036,7 +15138,7 @@ index ed6bee4..33782de 100644
          return false;
      });
      sprite->collidesWithGroupMask = mask;
-@@ -1811,7 +2997,7 @@ static void playdate_graphics_sprite_setGroupMask_lua(Cranked *cranked, Sprite s
+@@ -1811,7 +3084,7 @@ static void playdate_graphics_sprite_setGroupMask_lua(Cranked *cranked, Sprite s
      sprite->groupMask = mask;
  }
  
@@ -15045,7 +15147,7 @@ index ed6bee4..33782de 100644
      return sprite->groupMask;
  }
  
-@@ -1819,7 +3005,8 @@ static void playdate_graphics_sprite_setCollidesWithGroupsMask_lua(Cranked *cran
+@@ -1819,7 +3092,8 @@ static void playdate_graphics_sprite_setCollidesWithGroupsMask_lua(Cranked *cran
      sprite->collidesWithGroupMask = mask;
  }
  
@@ -15055,7 +15157,7 @@ index ed6bee4..33782de 100644
      return sprite->collidesWithGroupMask;
  }
  
-@@ -1832,16 +3019,15 @@ static void playdate_graphics_sprite_resetCollidesWithGroupsMask_lua(Cranked *cr
+@@ -1832,16 +3106,15 @@ static void playdate_graphics_sprite_resetCollidesWithGroupsMask_lua(Cranked *cr
  }
  
  static LuaRet moveOrCheckCollisions(LuaVal spriteVal, LuaVal arg1, LuaVal arg2, bool sim) {
@@ -15075,7 +15177,7 @@ index ed6bee4..33782de 100644
          if (hasResponseFunc) {
              lua_pushvalue(context, response.val);
              pushResource(cranked, a);
-@@ -1866,15 +3052,20 @@ static LuaRet moveOrCheckCollisions(LuaVal spriteVal, LuaVal arg1, LuaVal arg2,
+@@ -1866,15 +3139,20 @@ static LuaRet moveOrCheckCollisions(LuaVal spriteVal, LuaVal arg1, LuaVal arg2,
          collision.val.setIntField("type", (int)entry.type);
          collision.val.setBoolField("overlaps", entry.overlaps);
          collision.val.setFloatField("ti", entry.ti);
@@ -15101,7 +15203,7 @@ index ed6bee4..33782de 100644
          collisionsArray.setElement(i + 1, collision.val);
      }
      pushInt(cranked, (int)collisions.size());
-@@ -1915,8 +3106,7 @@ static LuaRet playdate_graphics_sprite_querySpritesAlongLine_lua(Cranked *cranke
+@@ -1915,8 +3193,7 @@ static LuaRet playdate_graphics_sprite_querySpritesAlongLine_lua(Cranked *cranke
  static LuaRet playdate_graphics_sprite_querySpriteInfoAlongLine_lua(Cranked *cranked, LuaVal arg1, LuaVal arg2, LuaVal arg3, LuaVal arg4) {
      auto segment = arg2.isNil() ? arg1.asLineSeg() : LineSeg{ arg1.asFloat(), arg2.asFloat(), arg3.asFloat(), arg4.asFloat() };
      auto segmentInfo = cranked->bump.querySegmentInfo(segment);
@@ -15111,7 +15213,7 @@ index ed6bee4..33782de 100644
      int i = 1;
      for (auto &info : segmentInfo) {
          LuaValGuard infoTable(pushTable(cranked));
-@@ -1927,14 +3117,15 @@ static LuaRet playdate_graphics_sprite_querySpriteInfoAlongLine_lua(Cranked *cra
+@@ -1927,14 +3204,15 @@ static LuaRet playdate_graphics_sprite_querySpriteInfoAlongLine_lua(Cranked *cra
          infoTable.val.setFloatField("ti1", info.ti1);
          infoTable.val.setFloatField("ti2", info.ti2);
      }
@@ -15131,7 +15233,7 @@ index ed6bee4..33782de 100644
      }
  }
  
-@@ -1943,7 +3134,9 @@ static void playdate_graphics_video_gc_lua(Cranked *cranked, VideoPlayer video)
+@@ -1943,7 +3221,9 @@ static void playdate_graphics_video_gc_lua(Cranked *cranked, VideoPlayer video)
  }
  
  static LuaRet playdate_graphics_video_getSize_lua(Cranked *cranked, VideoPlayer video) {
@@ -15142,7 +15244,7 @@ index ed6bee4..33782de 100644
  }
  
  static int playdate_graphics_video_getFrameCount_lua(Cranked *cranked, VideoPlayer video) {
-@@ -1959,15 +3152,17 @@ static void playdate_graphics_video_setContext_lua(Cranked *cranked, VideoPlayer
+@@ -1959,15 +3239,17 @@ static void playdate_graphics_video_setContext_lua(Cranked *cranked, VideoPlayer
  }
  
  static NodeGraph playdate_pathfinder_graph_new_lua(Cranked *cranked, int nodeCount, LuaVal coordinates) {
@@ -15162,7 +15264,7 @@ index ed6bee4..33782de 100644
          }
      }
      return graph;
-@@ -1979,6 +3174,9 @@ static void playdate_pathfinder_graph_gc_lua(Cranked *cranked, NodeGraph graph)
+@@ -1979,6 +3261,9 @@ static void playdate_pathfinder_graph_gc_lua(Cranked *cranked, NodeGraph graph)
  
  static NodeGraph playdate_pathfinder_graph_new2DGrid_lua(Cranked *cranked, int width, int height, bool allowDiagonals, LuaVal includedNodes) {
      constexpr int cost = 10, diagonalCost = 14;
@@ -15172,7 +15274,7 @@ index ed6bee4..33782de 100644
      const int count = width * height;
      vector connected(count, true);
      vector<GraphNode> nodes(count);
-@@ -1995,22 +3193,21 @@ static NodeGraph playdate_pathfinder_graph_new2DGrid_lua(Cranked *cranked, int w
+@@ -1995,22 +3280,21 @@ static NodeGraph playdate_pathfinder_graph_new2DGrid_lua(Cranked *cranked, int w
              node->id = i + 1;
              node->x = x + 1;
              node->y = y + 1;
@@ -15210,7 +15312,7 @@ index ed6bee4..33782de 100644
          }
      }
      return graph;
-@@ -2032,19 +3229,29 @@ static GraphNode playdate_pathfinder_graph_addNewNode_lua(Cranked *cranked, Node
+@@ -2032,19 +3316,29 @@ static GraphNode playdate_pathfinder_graph_addNewNode_lua(Cranked *cranked, Node
          auto weightVal = weight.val.asInt();
          node->addConnection(otherNode, weightVal);
          if (addReciprocalConnections)
@@ -15243,7 +15345,7 @@ index ed6bee4..33782de 100644
      graph->nodes.emplace(node);
      if (not connectedNodes.isTable() or not weights.isTable())
          return;
-@@ -2057,7 +3264,7 @@ static void playdate_pathfinder_graph_addNode_lua(Cranked *cranked, NodeGraph gr
+@@ -2057,7 +3351,7 @@ static void playdate_pathfinder_graph_addNode_lua(Cranked *cranked, NodeGraph gr
          auto weightVal = weight.val.asInt();
          node->addConnection(otherNode, weightVal);
          if (addReciprocalConnections)
@@ -15252,7 +15354,7 @@ index ed6bee4..33782de 100644
      }
  }
  
-@@ -2066,7 +3273,9 @@ static void playdate_pathfinder_graph_addNodes_lua(Cranked *cranked, NodeGraph g
+@@ -2066,7 +3360,9 @@ static void playdate_pathfinder_graph_addNodes_lua(Cranked *cranked, NodeGraph g
          auto node = nodes.getElement(i);
          if (node.val.isNil())
              break;
@@ -15263,7 +15365,7 @@ index ed6bee4..33782de 100644
      }
  }
  
-@@ -2079,6 +3288,7 @@ static LuaValRet playdate_pathfinder_graph_allNodes_lua(Cranked *cranked, NodeGr
+@@ -2079,6 +3375,7 @@ static LuaValRet playdate_pathfinder_graph_allNodes_lua(Cranked *cranked, NodeGr
  }
  
  static void playdate_pathfinder_graph_removeNode_lua(Cranked *cranked, NodeGraph graph, GraphNode node) {
@@ -15271,7 +15373,7 @@ index ed6bee4..33782de 100644
      node->removeAllConnections();
      eraseByEquivalentKey(graph->nodes, node);
  }
-@@ -2094,7 +3304,7 @@ static LuaRet playdate_pathfinder_graph_removeNodeWithXY_lua(Cranked *cranked, N
+@@ -2094,7 +3391,7 @@ static LuaRet playdate_pathfinder_graph_removeNodeWithXY_lua(Cranked *cranked, N
  }
  
  static LuaRet playdate_pathfinder_graph_removeNodeWithID_lua(Cranked *cranked, NodeGraph graph, LuaVal id) {
@@ -15280,7 +15382,7 @@ index ed6bee4..33782de 100644
          node->removeAllConnections();
          pushResource(cranked, node);
          eraseByEquivalentKey(graph->nodes, node);
-@@ -2104,7 +3314,7 @@ static LuaRet playdate_pathfinder_graph_removeNodeWithID_lua(Cranked *cranked, N
+@@ -2104,7 +3401,7 @@ static LuaRet playdate_pathfinder_graph_removeNodeWithID_lua(Cranked *cranked, N
  }
  
  static LuaRet playdate_pathfinder_graph_nodeWithID_lua(Cranked *cranked, NodeGraph graph, LuaVal id) {
@@ -15289,7 +15391,7 @@ index ed6bee4..33782de 100644
          pushResource(cranked, node);
      else
          pushNil(cranked);
-@@ -2120,23 +3330,29 @@ static LuaRet playdate_pathfinder_graph_nodeWithXY_lua(Cranked *cranked, NodeGra
+@@ -2120,23 +3417,29 @@ static LuaRet playdate_pathfinder_graph_nodeWithXY_lua(Cranked *cranked, NodeGra
  }
  
  static void playdate_pathfinder_graph_addConnections_lua(Cranked *cranked, NodeGraph graph, LuaVal connections) {
@@ -15335,7 +15437,7 @@ index ed6bee4..33782de 100644
  }
  
  static void playdate_pathfinder_graph_addConnectionToNodeWithID_lua(Cranked *cranked, NodeGraph graph, int fromId, int toId, int weight, bool addReciprocalConnections) {
-@@ -2146,7 +3362,7 @@ static void playdate_pathfinder_graph_addConnectionToNodeWithID_lua(Cranked *cra
+@@ -2146,7 +3449,7 @@ static void playdate_pathfinder_graph_addConnectionToNodeWithID_lua(Cranked *cra
          return;
      from->addConnection(to, weight);
      if (addReciprocalConnections)
@@ -15344,7 +15446,7 @@ index ed6bee4..33782de 100644
  }
  
  static void playdate_pathfinder_graph_removeAllConnections_lua(Cranked *cranked, NodeGraph graph) {
-@@ -2163,15 +3379,27 @@ static void playdate_pathfinder_graph_removeAllConnectionsFromNodeWithID_lua(Cra
+@@ -2163,15 +3466,27 @@ static void playdate_pathfinder_graph_removeAllConnectionsFromNodeWithID_lua(Cra
  }
  
  static LuaRet findPath(NodeGraph graph, GraphNode startNode, GraphNode goalNode, LuaVal heuristic, bool findPathToGoalAdjacentNodes, bool getIds = false) {
@@ -15376,7 +15478,7 @@ index ed6bee4..33782de 100644
      if (not path.empty()) {
          auto table = pushTable(cranked);
          for (int i = 0; i < path.size(); i++) {
-@@ -2215,12 +3443,13 @@ static LuaRet playdate_pathfinder_node_index_lua(Cranked *cranked, GraphNode nod
+@@ -2215,12 +3530,13 @@ static LuaRet playdate_pathfinder_node_index_lua(Cranked *cranked, GraphNode nod
          return 1;
      if (key.isString()) {
          string name(key.asString());
@@ -15393,7 +15495,7 @@ index ed6bee4..33782de 100644
          else
              pushNil(cranked);
      } else
-@@ -2230,34 +3459,39 @@ static LuaRet playdate_pathfinder_node_index_lua(Cranked *cranked, GraphNode nod
+@@ -2230,34 +3546,39 @@ static LuaRet playdate_pathfinder_node_index_lua(Cranked *cranked, GraphNode nod
  
  static void playdate_pathfinder_node_newindex_lua(Cranked *cranked, GraphNode node, LuaVal key, LuaVal value) {
      if (!key.isString())
@@ -15437,7 +15539,7 @@ index ed6bee4..33782de 100644
      }
  }
  
-@@ -2298,36 +3532,84 @@ static void playdate_pathfinder_node_setXY_lua(Cranked *cranked, GraphNode node,
+@@ -2298,36 +3619,84 @@ static void playdate_pathfinder_node_setXY_lua(Cranked *cranked, GraphNode node,
      node->y = y;
  }
  
@@ -15533,7 +15635,7 @@ index ed6bee4..33782de 100644
  }
  
  static void playdate_sound_sampleplayer_gc_lua(Cranked *cranked, SamplePlayer player) {
-@@ -2338,30 +3620,57 @@ static SamplePlayer playdate_sound_sampleplayer_copy_lua(Cranked *cranked, Sampl
+@@ -2338,30 +3707,57 @@ static SamplePlayer playdate_sound_sampleplayer_copy_lua(Cranked *cranked, Sampl
      return player->copy();
  }
  
@@ -15601,7 +15703,7 @@ index ed6bee4..33782de 100644
  }
  
  static AudioSample playdate_sound_sampleplayer_getSample_lua(Cranked *cranked, SamplePlayer player) {
-@@ -2370,53 +3679,114 @@ static AudioSample playdate_sound_sampleplayer_getSample_lua(Cranked *cranked, S
+@@ -2370,53 +3766,114 @@ static AudioSample playdate_sound_sampleplayer_getSample_lua(Cranked *cranked, S
  
  static void playdate_sound_sampleplayer_setRateMod_lua(Cranked *cranked, SamplePlayer player, SynthSignalValue *signalDerived) {
      player->rateModulator = cranked->audio.signalFromDerived(signalDerived);
@@ -15733,7 +15835,7 @@ index ed6bee4..33782de 100644
  }
  
  static LuaRet playdate_sound_sample_new_lua(Cranked *cranked, LuaVal arg1, LuaVal arg2) {
-@@ -2426,10 +3796,27 @@ static LuaRet playdate_sound_sample_new_lua(Cranked *cranked, LuaVal arg1, LuaVa
+@@ -2426,10 +3883,27 @@ static LuaRet playdate_sound_sample_new_lua(Cranked *cranked, LuaVal arg1, LuaVa
          try {
              sample = cranked->audio.loadSample(arg1.asString());
          } catch (exception &ex) {
@@ -15764,7 +15866,7 @@ index ed6bee4..33782de 100644
      return returnValues(cranked, sample);
  }
  
-@@ -2437,20 +3824,33 @@ static void playdate_sound_sample_gc_lua(Cranked *cranked, AudioSample sample) {
+@@ -2437,20 +3911,33 @@ static void playdate_sound_sample_gc_lua(Cranked *cranked, AudioSample sample) {
      sample->dereference();
  }
  
@@ -15803,7 +15905,7 @@ index ed6bee4..33782de 100644
      }
  }
  
-@@ -2463,26 +3863,41 @@ static SoundFormat playdate_sound_sample_getFormat_lua(Cranked *cranked, AudioSa
+@@ -2463,30 +3950,47 @@ static SoundFormat playdate_sound_sample_getFormat_lua(Cranked *cranked, AudioSa
  }
  
  static LuaRet playdate_sound_sample_getLength_lua(Cranked *cranked, AudioSample sample) {
@@ -15854,13 +15956,26 @@ index ed6bee4..33782de 100644
 +    }
  }
  
- static SoundChannel playdate_sound_channel_new_lua(Cranked *cranked) {
-@@ -2497,8 +3912,19 @@ static void playdate_sound_channel_remove_lua(Cranked *cranked, SoundChannel cha
-     eraseByEquivalentKey(cranked->audio.channels, channel);
+-static SoundChannel playdate_sound_channel_new_lua(Cranked *cranked) {
+-    return cranked->audio.allocateChannel();
++static LuaRet playdate_sound_channel_new_lua(Cranked *cranked) {
++    auto count = returnValues(cranked, cranked->audio.allocateChannel());
++    keepChannelValue(cranked, -1, true); // kept while in the mix (see keepChannelValue)
++    return count;
  }
  
+ static void playdate_sound_channel_gc_lua(Cranked *cranked, SoundChannel channel) {
+@@ -2495,10 +3999,22 @@ static void playdate_sound_channel_gc_lua(Cranked *cranked, SoundChannel channel
+ 
+ static void playdate_sound_channel_remove_lua(Cranked *cranked, SoundChannel channel) {
+     eraseByEquivalentKey(cranked->audio.channels, channel);
+-}
+-
 -static Synth playdate_sound_synth_new_lua(Cranked *cranked) {
 -    return cranked->audio.allocateSource<PDSynth_32>();
++    keepChannelValue(cranked, 1, false);
++}
++
 +static Synth playdate_sound_synth_new_lua(Cranked *cranked, LuaVal waveform) {
 +    auto synth = cranked->audio.allocateSource<PDSynth_32>();
 +    // As on the device: synth.new(waveform) sets the waveform through the usual setter (so a square wave
@@ -15877,7 +15992,7 @@ index ed6bee4..33782de 100644
  }
  
  static void playdate_sound_synth_gc_lua(Cranked *cranked, Synth synth) {
-@@ -2506,54 +3932,99 @@ static void playdate_sound_synth_gc_lua(Cranked *cranked, Synth synth) {
+@@ -2506,54 +4022,99 @@ static void playdate_sound_synth_gc_lua(Cranked *cranked, Synth synth) {
  }
  
  static Synth playdate_sound_synth_copy_lua(Cranked *cranked, Synth synth) {
@@ -15996,7 +16111,7 @@ index ed6bee4..33782de 100644
  }
  
  static SynthLFO playdate_sound_lfo_new_lua(Cranked *cranked, LFOType type) {
-@@ -2564,8 +4035,23 @@ static void playdate_sound_lfo_gc_lua(Cranked *cranked, SynthLFO lfo) {
+@@ -2564,8 +4125,23 @@ static void playdate_sound_lfo_gc_lua(Cranked *cranked, SynthLFO lfo) {
      lfo->dereference();
  }
  
@@ -16022,7 +16137,7 @@ index ed6bee4..33782de 100644
  }
  
  static SynthEnvelope playdate_sound_envelope_new_lua(Cranked *cranked, float attack, float decay, float sustain, float release) {
-@@ -2576,6 +4062,10 @@ static void playdate_sound_envelope_gc_lua(Cranked *cranked, SynthEnvelope envel
+@@ -2576,6 +4152,10 @@ static void playdate_sound_envelope_gc_lua(Cranked *cranked, SynthEnvelope envel
      envelope->dereference();
  }
  
@@ -16033,7 +16148,7 @@ index ed6bee4..33782de 100644
  static void playdate_sound_envelope_setScale_lua(Cranked *cranked, SynthEnvelope envelope, float scale) {
      envelope->scale = scale;
  }
-@@ -2585,11 +4075,17 @@ static void playdate_sound_envelope_setOffset_lua(Cranked *cranked, SynthEnvelop
+@@ -2585,11 +4165,17 @@ static void playdate_sound_envelope_setOffset_lua(Cranked *cranked, SynthEnvelop
  }
  
  static void playdate_sound_envelope_trigger_lua(Cranked *cranked, SynthEnvelope envelope, float velocity, LuaVal length) {
@@ -16053,7 +16168,7 @@ index ed6bee4..33782de 100644
  }
  
  static BitCrusher playdate_sound_effect_bitcrusher_new_lua(Cranked *cranked) {
-@@ -2633,7 +4129,8 @@ static void playdate_sound_effect_overdrive_gc_lua(Cranked *cranked, Overdrive o
+@@ -2633,7 +4219,8 @@ static void playdate_sound_effect_overdrive_gc_lua(Cranked *cranked, Overdrive o
  }
  
  static DelayLine playdate_sound_delayline_new_lua(Cranked *cranked, float length) {
@@ -16063,7 +16178,7 @@ index ed6bee4..33782de 100644
  }
  
  static void playdate_sound_delayline_gc_lua(Cranked *cranked, DelayLine delayLine) {
-@@ -2644,20 +4141,57 @@ static DelayLineTap playdate_sound_delayline_addTap_lua(Cranked *cranked, DelayL
+@@ -2644,20 +4231,57 @@ static DelayLineTap playdate_sound_delayline_addTap_lua(Cranked *cranked, DelayL
      return cranked->audio.allocateSource<DelayLineTap_32>(delayLine, delay);
  }
  
@@ -16127,7 +16242,7 @@ index ed6bee4..33782de 100644
  }
  
  static void playdate_sound_sequence_gc_lua(Cranked *cranked, SoundSequence sequence) {
-@@ -2665,16 +4199,44 @@ static void playdate_sound_sequence_gc_lua(Cranked *cranked, SoundSequence seque
+@@ -2665,16 +4289,44 @@ static void playdate_sound_sequence_gc_lua(Cranked *cranked, SoundSequence seque
  }
  
  static void playdate_sound_sequence_play_lua(Cranked *cranked, SoundSequence sequence, LuaVal finishCallback) {
@@ -16176,7 +16291,7 @@ index ed6bee4..33782de 100644
  }
  
  static void playdate_sound_sequence_setLoops_lua(Cranked *cranked, SoundSequence sequence, int startStep, int endStep, int loopCount) {
-@@ -2684,17 +4246,19 @@ static void playdate_sound_sequence_setLoops_lua(Cranked *cranked, SoundSequence
+@@ -2684,17 +4336,19 @@ static void playdate_sound_sequence_setLoops_lua(Cranked *cranked, SoundSequence
  }
  
  static LuaRet playdate_sound_sequence_addTrack_lua(Cranked *cranked, SoundSequence sequence, SequenceTrack track) {
@@ -16200,7 +16315,7 @@ index ed6bee4..33782de 100644
  }
  
  static SequenceTrack playdate_sound_track_new_lua(Cranked *cranked) {
-@@ -2706,78 +4270,248 @@ static void playdate_sound_track_gc_lua(Cranked *cranked, SequenceTrack track) {
+@@ -2706,78 +4360,248 @@ static void playdate_sound_track_gc_lua(Cranked *cranked, SequenceTrack track) {
  }
  
  static void playdate_sound_track_addNote_lua(Cranked *cranked, SequenceTrack track, LuaVal arg1, LuaVal note, int length, LuaVal velocity) {
@@ -16326,7 +16441,7 @@ index ed6bee4..33782de 100644
 +        while (lua_next(L, held)) {
 +            bool fresh = lua_toboolean(L, -1);
 +            auto source = LuaVal(L, -2).asUserdataObject<SoundSource_32 *>();
-+            bool playing = source and source->playing;
++            bool playing = source and source->sounding();
 +            if (!playing or fresh) { lua_pushvalue(L, -2); changes.emplace_back(luaL_ref(L, LUA_REGISTRYINDEX), !playing and !fresh); }
 +            lua_pop(L, 1);
 +        }
@@ -16475,7 +16590,7 @@ index ed6bee4..33782de 100644
  }
  
  static ControlSignal playdate_sound_controlsignal_new_lua(Cranked *cranked) {
-@@ -2788,26 +4522,72 @@ static void playdate_sound_controlsignal_gc_lua(Cranked *cranked, ControlSignal
+@@ -2788,26 +4612,72 @@ static void playdate_sound_controlsignal_gc_lua(Cranked *cranked, ControlSignal
      signal->dereference();
  }
  
@@ -16557,7 +16672,7 @@ index ed6bee4..33782de 100644
  }
  
  static void playdate_sound_micinput_recordToSample_lua(Cranked *cranked) {
-@@ -2818,6 +4598,10 @@ static void playdate_sound_micinput_stopRecording_lua(Cranked *cranked) {
+@@ -2818,6 +4688,10 @@ static void playdate_sound_micinput_stopRecording_lua(Cranked *cranked) {
      // Todo
  }
  
@@ -16568,7 +16683,7 @@ index ed6bee4..33782de 100644
  static void playdate_sound_micinput_startListening_lua(Cranked *cranked) {
      // Todo
  }
-@@ -2826,13 +4610,38 @@ static void playdate_sound_micinput_stopListening_lua(Cranked *cranked) {
+@@ -2826,13 +4700,38 @@ static void playdate_sound_micinput_stopListening_lua(Cranked *cranked) {
      // Todo
  }
  
@@ -16614,7 +16729,7 @@ index ed6bee4..33782de 100644
  
  void LuaEngine::registerLuaGlobals() {
      // Global import function for loading modules
-@@ -2867,28 +4676,32 @@ void LuaEngine::registerLuaGlobals() {
+@@ -2867,28 +4766,32 @@ void LuaEngine::registerLuaGlobals() {
          playdate.setInteger("kButtonDown", (int)PDButtons::Down);
          playdate.setInteger("kButtonB", (int)PDButtons::B);
          playdate.setInteger("kButtonA", (int)PDButtons::A);
@@ -16652,7 +16767,7 @@ index ed6bee4..33782de 100644
          playdate.setWrappedFunction<playdate_sys_getCurrentTimeMilliseconds>("getCurrentTimeMilliseconds");
          playdate.setWrappedFunction<playdate_sys_resetElapsedTime>("resetElapsedTime");
          playdate.setWrappedFunction<playdate_sys_getElapsedTime>("getElapsedTime");
-@@ -2899,21 +4712,35 @@ void LuaEngine::registerLuaGlobals() {
+@@ -2899,21 +4802,35 @@ void LuaEngine::registerLuaGlobals() {
          playdate.setWrappedFunction<playdate_epochFromGMTTime_lua>("epochFromGMTTime");
          playdate.setWrappedFunction<playdate_timeFromEpoch_lua>("timeFromEpoch");
          playdate.setWrappedFunction<playdate_GMTTimeFromEpoch_lua>("GMTTimeFromEpoch");
@@ -16690,7 +16805,15 @@ index ed6bee4..33782de 100644
              lua_setfield(getContext(), -2, entry.first.c_str());
          }
          lua_setfield(getContext(), -2, "metadata");
-@@ -2964,7 +4791,7 @@ void LuaEngine::registerLuaGlobals() {
+@@ -2938,6 +4855,7 @@ void LuaEngine::registerLuaGlobals() {
+                 auto menuItem = LuaApiHelper(getContext(), "item");
+                 menuItem.setSelfIndex();
+                 menuItem.setString("__name", "playdate.menu.item");
++                menuItem.setWrappedFunction<playdate_menu_item_gc_lua>("__gc");
+                 menuItem.setWrappedFunction<playdate_menu_item_index_lua>("__index");
+                 menuItem.setWrappedFunction<playdate_menu_item_newindex_lua>("__newindex");
+                 menuItem.setWrappedFunction<playdate_menu_item_setCallback_lua>("setCallback");
+@@ -2964,7 +4882,7 @@ void LuaEngine::registerLuaGlobals() {
              display.setWrappedFunction<playdate_display_getInverted_lua>("getInverted");
              display.setWrappedFunction<playdate_display_setMosaic>("setMosaic");
              display.setWrappedFunction<playdate_display_getMosaic_lua>("getMosaic");
@@ -16699,7 +16822,7 @@ index ed6bee4..33782de 100644
              display.setWrappedFunction<playdate_display_getOffset_lua>("getOffset");
              display.setWrappedFunction<playdate_display_setFlipped>("setFlipped");
              display.setWrappedFunction<playdate_display_loadImage_lua>("loadImage");
-@@ -2994,12 +4821,12 @@ void LuaEngine::registerLuaGlobals() {
+@@ -2994,12 +4912,12 @@ void LuaEngine::registerLuaGlobals() {
              file.setWrappedFunction<playdate_file_listFiles_lua>("listFiles");
              file.setWrappedFunction<playdate_file_exists_lua>("exists");
              file.setWrappedFunction<playdate_file_isdir_lua>("isdir");
@@ -16714,8 +16837,12 @@ index ed6bee4..33782de 100644
              file.setWrappedFunction<playdate_file_load_lua>("load");
              file.setWrappedFunction<playdate_file_run_lua>("run");
  
-@@ -3010,7 +4837,7 @@ void LuaEngine::registerLuaGlobals() {
-                 fileFile.setWrappedFunction<playdate_file_close_lua>("__gc");
+@@ -3007,10 +4925,10 @@ void LuaEngine::registerLuaGlobals() {
+                 auto fileFile = LuaApiHelper(getContext(), "file");
+                 fileFile.setSelfIndex();
+                 fileFile.setString("__name", "playdate.file.file");
+-                fileFile.setWrappedFunction<playdate_file_close_lua>("__gc");
++                fileFile.setWrappedFunction<playdate_file_gc_lua>("__gc");
                  fileFile.setWrappedFunction<playdate_file_close_lua>("close");
                  fileFile.setWrappedFunction<playdate_file_write_lua>("write");
 -                fileFile.setWrappedFunction<playdate_file_flush>("flush");
@@ -16723,7 +16850,7 @@ index ed6bee4..33782de 100644
                  fileFile.setWrappedFunction<playdate_file_readline_lua>("readline");
                  fileFile.setWrappedFunction<playdate_file_read_lua>("read");
                  fileFile.setWrappedFunction<playdate_file_seek_lua>("seek");
-@@ -3029,47 +4856,62 @@ void LuaEngine::registerLuaGlobals() {
+@@ -3029,47 +4947,62 @@ void LuaEngine::registerLuaGlobals() {
              {
                  auto rect = LuaApiHelper(getContext(), "rect");
                  rect.setString("__name", "playdate.geometry.rect");
@@ -16786,7 +16913,7 @@ index ed6bee4..33782de 100644
              }
          }
  
-@@ -3098,10 +4940,13 @@ void LuaEngine::registerLuaGlobals() {
+@@ -3098,10 +5031,13 @@ void LuaEngine::registerLuaGlobals() {
              gfx.setInteger("kPolygonFillNonZero", (int)LCDPolygonFillRule::NonZero);
              gfx.setInteger("kPolygonFillEvenOdd", (int)LCDPolygonFillRule::EvenOdd);
              gfx.setInteger("kStrokeCentered", (int)StrokeLocation::Centered);
@@ -16803,7 +16930,7 @@ index ed6bee4..33782de 100644
              gfx.setWrappedFunction<playdate_graphics_clear_lua>("clear");
              gfx.setWrappedFunction<playdate_graphics_imageSizeAtPath_lua>("imageSizeAtPath");
              gfx.setWrappedFunction<playdate_graphics_checkAlphaCollision_lua>("checkAlphaCollision");
-@@ -3247,6 +5092,7 @@ void LuaEngine::registerLuaGlobals() {
+@@ -3247,6 +5183,7 @@ void LuaEngine::registerLuaGlobals() {
                  auto font = LuaApiHelper(getContext(), "font");
                  font.setSelfIndex();
                  font.setString("__name", "playdate.graphics.font");
@@ -16811,7 +16938,7 @@ index ed6bee4..33782de 100644
                  font.setInteger("kLanguageEnglish", (int)PDLanguage::English);
                  font.setInteger("kLanguageJapanese", (int)PDLanguage::Japanese);
                  font.setInteger("kVariantNormal", (int)PDFontVariant::Normal);
-@@ -3267,6 +5113,8 @@ void LuaEngine::registerLuaGlobals() {
+@@ -3267,6 +5204,8 @@ void LuaEngine::registerLuaGlobals() {
              { // Official implementation uses a table with a `_spriteud` userdata field, but using a plain userdata type in `userdata` should work fine
                  auto sprite = LuaApiHelper(getContext(), "sprite"); // Can't have __index, since it is overwritten by sprites.lua // Todo: Could actually work fine with the pre-loading mechanism
                  sprite.setString("__name", "playdate.graphics.sprite");
@@ -16820,7 +16947,7 @@ index ed6bee4..33782de 100644
                  sprite.setInteger("kCollisionTypeSlide", (int)Bump::ResponseType::Slide);
                  sprite.setInteger("kCollisionTypeFreeze", (int)Bump::ResponseType::Freeze);
                  sprite.setInteger("kCollisionTypeOverlap", (int)Bump::ResponseType::Overlap);
-@@ -3280,17 +5128,17 @@ void LuaEngine::registerLuaGlobals() {
+@@ -3280,17 +5219,17 @@ void LuaEngine::registerLuaGlobals() {
                  sprite.setWrappedFunction<playdate_graphics_sprite_add_lua>("addSprite");
                  sprite.setWrappedFunction<playdate_graphics_sprite_remove_lua>("remove");
                  sprite.setWrappedFunction<playdate_graphics_sprite_remove_lua>("removeSprite");
@@ -16841,7 +16968,7 @@ index ed6bee4..33782de 100644
                  sprite.setWrappedFunction<playdate_graphics_sprite_getSize_lua>("getSize");
                  sprite.setWrappedFunction<playdate_graphics_sprite_setScale_lua>("setScale");
                  sprite.setWrappedFunction<playdate_graphics_sprite_getScale_lua>("getScale");
-@@ -3298,7 +5146,7 @@ void LuaEngine::registerLuaGlobals() {
+@@ -3298,7 +5237,7 @@ void LuaEngine::registerLuaGlobals() {
                  sprite.setWrappedFunction<playdate_graphics_sprite_getRotation_lua>("getRotation");
                  sprite.setWrappedFunction<playdate_graphics_sprite_copy_lua>("copy");
                  sprite.setWrappedFunction<playdate_sprite_setUpdatesEnabled>("setUpdatesEnabled");
@@ -16850,7 +16977,7 @@ index ed6bee4..33782de 100644
                  sprite.setWrappedFunction<playdate_sprite_setTag>("setTag");
                  sprite.setWrappedFunction<playdate_sprite_getTag>("getTag");
                  sprite.setWrappedFunction<playdate_sprite_setDrawMode>("setImageDrawMode");
-@@ -3335,7 +5183,7 @@ void LuaEngine::registerLuaGlobals() {
+@@ -3335,7 +5274,7 @@ void LuaEngine::registerLuaGlobals() {
                  sprite.setWrappedFunction<playdate_graphics_sprite_allOverlappingSprites_lua>("allOverlappingSprites");
                  sprite.setWrappedFunction<playdate_graphics_sprite_alphaCollision_lua>("alphaCollision");
                  sprite.setWrappedFunction<playdate_sprite_setCollisionsEnabled>("setCollisionsEnabled");
@@ -16859,7 +16986,7 @@ index ed6bee4..33782de 100644
                  sprite.setWrappedFunction<playdate_graphics_sprite_setGroups_lua>("setGroups");
                  sprite.setWrappedFunction<playdate_graphics_sprite_setCollidesWithGroups_lua>("setCollidesWithGroups");
                  sprite.setWrappedFunction<playdate_graphics_sprite_setGroupMask_lua>("setGroupMask");
-@@ -3364,7 +5212,8 @@ void LuaEngine::registerLuaGlobals() {
+@@ -3364,7 +5303,8 @@ void LuaEngine::registerLuaGlobals() {
                  video.setWrappedFunction<playdate_graphics_video_setContext_lua>("setContext");
                  video.setWrappedFunction<playdate_video_getContext>("getContext");
                  video.setWrappedFunction<playdate_video_useScreenContext>("useScreenContext");
@@ -16869,7 +16996,7 @@ index ed6bee4..33782de 100644
              }
          }
  
-@@ -3448,7 +5297,7 @@ void LuaEngine::registerLuaGlobals() {
+@@ -3448,7 +5388,7 @@ void LuaEngine::registerLuaGlobals() {
              sound.setWrappedFunction<playdate_sound_removeEffect_lua>("removeEffect");
              sound.setWrappedFunction<playdate_sound_getHeadphoneState_lua>("getHeadphoneState");
              sound.setWrappedFunction<playdate_sound_setOutputsActive>("setOutputsActive");
@@ -16878,7 +17005,7 @@ index ed6bee4..33782de 100644
              sound.setWrappedFunction<playdate_sound_resetTime_lua>("resetTime");
  
              {
-@@ -3465,7 +5314,7 @@ void LuaEngine::registerLuaGlobals() {
+@@ -3465,7 +5405,7 @@ void LuaEngine::registerLuaGlobals() {
                  samplePlayer.setWrappedFunction<playdate_sound_sampleplayer_setLoopCallback_lua>("setLoopCallback");
                  samplePlayer.setWrappedFunction<playdate_sound_sampleplayer_setPlayRange>("setPlayRange");
                  samplePlayer.setWrappedFunction<playdate_sound_sampleplayer_setPaused>("setPaused");
@@ -16887,7 +17014,7 @@ index ed6bee4..33782de 100644
                  samplePlayer.setWrappedFunction<playdate_sound_sampleplayer_stop>("stop");
                  samplePlayer.setWrappedFunction<playdate_sound_sampleplayer_setFinishCallback_lua>("setFinishCallback");
                  samplePlayer.setWrappedFunction<playdate_sound_sampleplayer_setSample>("setSample");
-@@ -3486,12 +5335,13 @@ void LuaEngine::registerLuaGlobals() {
+@@ -3486,12 +5426,13 @@ void LuaEngine::registerLuaGlobals() {
                  filePlayer.setWrappedFunction<playdate_sound_fileplayer_new_lua>("new");
                  filePlayer.setWrappedFunction<playdate_sound_fileplayer_load_lua>("load");
                  filePlayer.setWrappedFunction<playdate_sound_fileplayer_play_lua>("play");
@@ -16905,7 +17032,7 @@ index ed6bee4..33782de 100644
                  filePlayer.setWrappedFunction<playdate_sound_fileplayer_setStopOnUnderrun>("setStopOnUnderrun");
                  filePlayer.setWrappedFunction<playdate_sound_fileplayer_setLoopRange_lua>("setLoopRange");
                  filePlayer.setWrappedFunction<playdate_sound_fileplayer_setLoopCallback_lua>("setLoopCallback");
-@@ -3513,7 +5363,7 @@ void LuaEngine::registerLuaGlobals() {
+@@ -3513,7 +5454,7 @@ void LuaEngine::registerLuaGlobals() {
                  sample.setWrappedFunction<playdate_sound_sample_new_lua>("new");
                  sample.setWrappedFunction<playdate_sound_sample_getSubsample_lua>("getSubsample");
                  sample.setWrappedFunction<playdate_sound_sample_load_lua>("load");
@@ -16914,7 +17041,7 @@ index ed6bee4..33782de 100644
                  sample.setWrappedFunction<playdate_sound_sample_getSampleRate_lua>("getSampleRate");
                  sample.setWrappedFunction<playdate_sound_sample_getFormat_lua>("getFormat");
                  sample.setWrappedFunction<playdate_sound_sample_getLength_lua>("getLength");
-@@ -3529,10 +5379,10 @@ void LuaEngine::registerLuaGlobals() {
+@@ -3529,10 +5470,10 @@ void LuaEngine::registerLuaGlobals() {
                  channel.setWrappedFunction<playdate_sound_channel_gc_lua>("__gc");
                  channel.setWrappedFunction<playdate_sound_channel_new_lua>("new");
                  channel.setWrappedFunction<playdate_sound_channel_remove_lua>("remove");
@@ -16929,7 +17056,7 @@ index ed6bee4..33782de 100644
                  channel.setWrappedFunction<playdate_sound_channel_setVolume>("setVolume");
                  channel.setWrappedFunction<playdate_sound_channel_getVolume>("getVolume");
                  channel.setWrappedFunction<playdate_sound_channel_setPan>("setPan");
-@@ -3540,6 +5390,7 @@ void LuaEngine::registerLuaGlobals() {
+@@ -3540,6 +5481,7 @@ void LuaEngine::registerLuaGlobals() {
                  channel.setWrappedFunction<playdate_sound_channel_setVolumeModulator>("setVolumeMod");
                  channel.setWrappedFunction<playdate_sound_channel_getDryLevelSignal>("getDryLevelSignal");
                  channel.setWrappedFunction<playdate_sound_channel_getWetLevelSignal>("getWetLevelSignal");
@@ -16937,7 +17064,7 @@ index ed6bee4..33782de 100644
              }
  
              {
-@@ -3551,9 +5402,9 @@ void LuaEngine::registerLuaGlobals() {
+@@ -3551,9 +5493,9 @@ void LuaEngine::registerLuaGlobals() {
                  synth.setWrappedFunction<playdate_sound_synth_copy_lua>("copy");
                  synth.setWrappedFunction<playdate_sound_synth_playNote_lua>("playNote");
                  synth.setWrappedFunction<playdate_sound_synth_playMIDINote_lua>("playMIDINote");
@@ -16949,7 +17076,7 @@ index ed6bee4..33782de 100644
                  synth.setWrappedFunction<playdate_sound_synth_setAmplitudeModulator>("setAmplitudeMod");
                  synth.setWrappedFunction<playdate_sound_synth_setADSR_lua>("setADSR");
                  synth.setWrappedFunction<playdate_sound_synth_setAttackTime>("setAttack");
-@@ -3583,6 +5434,15 @@ void LuaEngine::registerLuaGlobals() {
+@@ -3583,6 +5525,15 @@ void LuaEngine::registerLuaGlobals() {
                  signal.setWrappedFunction<playdate_sound_signal_setValueOffset>("setOffset");
                  signal.setWrappedFunction<playdate_sound_signal_setValueScale>("setScale");
                  signal.setWrappedFunction<playdate_sound_signal_getValue>("getValue");
@@ -16965,7 +17092,7 @@ index ed6bee4..33782de 100644
              }
  
              {
-@@ -3595,6 +5455,9 @@ void LuaEngine::registerLuaGlobals() {
+@@ -3595,6 +5546,9 @@ void LuaEngine::registerLuaGlobals() {
                  lfo.setWrappedFunction<playdate_sound_lfo_setArpeggio_lua>("setArpeggio");
                  lfo.setWrappedFunction<playdate_sound_lfo_setCenter>("setCenter");
                  lfo.setWrappedFunction<playdate_sound_lfo_setDepth>("setDepth");
@@ -16975,7 +17102,7 @@ index ed6bee4..33782de 100644
                  lfo.setWrappedFunction<playdate_sound_lfo_setRate>("setRate");
                  lfo.setWrappedFunction<playdate_sound_lfo_setPhase>("setPhase");
                  lfo.setWrappedFunction<playdate_sound_lfo_setStartPhase>("setStartPhase");
-@@ -3602,6 +5465,7 @@ void LuaEngine::registerLuaGlobals() {
+@@ -3602,6 +5556,7 @@ void LuaEngine::registerLuaGlobals() {
                  lfo.setWrappedFunction<playdate_sound_lfo_setRetrigger>("setRetrigger");
                  lfo.setWrappedFunction<playdate_sound_lfo_setDelay>("setDelay");
                  lfo.setWrappedFunction<playdate_sound_lfo_getValue>("getValue");
@@ -16983,7 +17110,7 @@ index ed6bee4..33782de 100644
              }
  
              {
-@@ -3638,6 +5502,11 @@ void LuaEngine::registerLuaGlobals() {
+@@ -3638,6 +5593,11 @@ void LuaEngine::registerLuaGlobals() {
                  bitCrusher.setWrappedFunction<playdate_sound_effect_bitcrusher_setAmountModulator>("setAmountMod");
                  bitCrusher.setWrappedFunction<playdate_sound_effect_bitcrusher_setUndersampling>("setUndersampling");
                  bitCrusher.setWrappedFunction<playdate_sound_effect_bitcrusher_setUndersampleModulator>("setUndersamplingMod");
@@ -16995,7 +17122,7 @@ index ed6bee4..33782de 100644
              }
  
              {
-@@ -3707,6 +5576,15 @@ void LuaEngine::registerLuaGlobals() {
+@@ -3707,6 +5667,15 @@ void LuaEngine::registerLuaGlobals() {
                  delayLine.setWrappedFunction<playdate_sound_effect_delayline_setFeedback>("setFeedback");
              }
  
@@ -17011,7 +17138,7 @@ index ed6bee4..33782de 100644
              {
                  auto delayLineTap = LuaApiHelper(getContext(), "delaylinetap");
                  delayLineTap.setSelfIndex();
-@@ -3726,12 +5604,13 @@ void LuaEngine::registerLuaGlobals() {
+@@ -3726,12 +5695,13 @@ void LuaEngine::registerLuaGlobals() {
                  sequence.setWrappedFunction<playdate_sound_sequence_gc_lua>("__gc");
                  sequence.setWrappedFunction<playdate_sound_sequence_new_lua>("new");
                  sequence.setWrappedFunction<playdate_sound_sequence_play_lua>("play");
@@ -17027,7 +17154,7 @@ index ed6bee4..33782de 100644
                  sequence.setWrappedFunction<playdate_sound_sequence_setLoops_lua>("setLoops");
                  sequence.setWrappedFunction<playdate_sound_sequence_getTrackCount>("getTrackCount");
                  sequence.setWrappedFunction<playdate_sound_sequence_addTrack_lua>("addTrack");
-@@ -3774,7 +5653,10 @@ void LuaEngine::registerLuaGlobals() {
+@@ -3774,7 +5744,10 @@ void LuaEngine::registerLuaGlobals() {
                  instrument.setWrappedFunction<playdate_sound_instrument_playNote_lua>("playNote");
                  instrument.setWrappedFunction<playdate_sound_instrument_playMIDINote_lua>("playMIDINote");
                  instrument.setWrappedFunction<playdate_sound_instrument_noteOff_lua>("noteOff");
@@ -17039,7 +17166,7 @@ index ed6bee4..33782de 100644
                  instrument.setWrappedFunction<playdate_sound_instrument_setVolume_lua>("setVolume");
                  instrument.setWrappedFunction<playdate_sound_instrument_getVolume_lua>("getVolume");
              }
-@@ -3784,12 +5666,15 @@ void LuaEngine::registerLuaGlobals() {
+@@ -3784,12 +5757,15 @@ void LuaEngine::registerLuaGlobals() {
                  controlSignal.setSelfIndex();
                  controlSignal.setString("__name", "playdate.sound.controlsignal");
                  controlSignal.setWrappedFunction<playdate_sound_controlsignal_gc_lua>("__gc");
@@ -17055,7 +17182,7 @@ index ed6bee4..33782de 100644
              }
  
              {
-@@ -3801,6 +5686,7 @@ void LuaEngine::registerLuaGlobals() {
+@@ -3801,6 +5777,7 @@ void LuaEngine::registerLuaGlobals() {
                  micInput.setWrappedFunction<playdate_sound_micinput_stopListening_lua>("stopListening");
                  micInput.setWrappedFunction<playdate_sound_micinput_getLevel_lua>("getLevel");
                  micInput.setWrappedFunction<playdate_sound_micinput_getSource_lua>("getSource");
@@ -17227,7 +17354,7 @@ index b665f7a..3a0e85e 100644
              else if constexpr (is_resource_ptr<A>)
                  cranked->luaEngine.pushResource(arg);
 diff --git a/core/Menu.cpp b/core/Menu.cpp
-index be15627..389689e 100644
+index be15627..dedc3ff 100644
 --- a/core/Menu.cpp
 +++ b/core/Menu.cpp
 @@ -9,7 +9,7 @@ PDMenuItem_32::PDMenuItem_32(Cranked &cranked, Type type)
@@ -17248,7 +17375,7 @@ index be15627..389689e 100644
          if (!cranked.luaEngine.getQualifiedLuaGlobal("cranked.menuCallbacks"))
              throw std::runtime_error("Lua menuCallbacks table not found");
          lua_geti(cranked.getLuaContext(), -1, i + 1);
-@@ -147,7 +147,7 @@ MenuItem Menu::addItem(const string &title, PDMenuItem_32::Type type, const vect
+@@ -147,10 +147,10 @@ MenuItem Menu::addItem(const string &title, PDMenuItem_32::Type type, const vect
              break;
          }
      if (index == -1)
@@ -17256,7 +17383,11 @@ index be15627..389689e 100644
 +        throw CrankedError("Cannot add more items to this menu."); // the device's message
  
      auto item = cranked.heap.construct<PDMenuItem_32>(cranked, type);
-     item->title = cranked.heap.allocateString(title.c_str());
+-    item->title = cranked.heap.allocateString(title.c_str());
++    item->title = title.c_str(); // copied into the item's own string
+     for (auto &option : options)
+         item->options.emplace_back(option, cranked.heap.allocator<char>());
+     item->value = value;
 diff --git a/core/NativeEngine.cpp b/core/NativeEngine.cpp
 index 866c7a9..35757ee 100644
 --- a/core/NativeEngine.cpp
@@ -19209,7 +19340,7 @@ index 0314ac2..c3eeadb 100644
          static pair<string, File> makeSystemFilePair(string path, FileType type, const uint8 *data, size_t size) {
              path = fs::path(normalizePath(path)).replace_extension().string();
 diff --git a/core/Runtime.cpp b/core/Runtime.cpp
-index e6f8222..b5a40b9 100644
+index e6f8222..2c5fdb1 100644
 --- a/core/Runtime.cpp
 +++ b/core/Runtime.cpp
 @@ -1,3 +1,5 @@
@@ -22830,7 +22961,14 @@ index e6f8222..b5a40b9 100644
  }
  
  SoundChannel cranked::playdate_sound_channel_newChannel(Cranked *cranked) {
-@@ -3186,32 +4035,50 @@ void cranked::playdate_sound_channel_freeChannel(Cranked *cranked, SoundChannel
+@@ -3181,37 +4030,57 @@ SoundChannel cranked::playdate_sound_channel_newChannel(Cranked *cranked) {
+ }
+ 
+ void cranked::playdate_sound_channel_freeChannel(Cranked *cranked, SoundChannel channel) {
++    // a freed channel leaves the mix too (newChannel put it there), so nothing renders it after the game freed it
++    if (channel and channel->getRefCount() <= 2) eraseByEquivalentKey(cranked->audio.channels, channel);
+     channel->dereference();
+ }
  
  int32 cranked::playdate_sound_channel_addSource(Cranked *cranked, SoundChannel channel, SoundSource sourceDerived) {
      auto source = cranked->audio.sourceFromDerived(sourceDerived);
@@ -22890,7 +23028,7 @@ index e6f8222..b5a40b9 100644
  }
  
  float cranked::playdate_sound_channel_getVolume(Cranked *cranked, SoundChannel channel) {
-@@ -3219,7 +4086,8 @@ float cranked::playdate_sound_channel_getVolume(Cranked *cranked, SoundChannel c
+@@ -3219,7 +4088,8 @@ float cranked::playdate_sound_channel_getVolume(Cranked *cranked, SoundChannel c
  }
  
  void cranked::playdate_sound_channel_setVolumeModulator(Cranked *cranked, SoundChannel channel, SynthSignalValue modDerived) {
@@ -22900,7 +23038,7 @@ index e6f8222..b5a40b9 100644
  }
  
  SynthSignalValue cranked::playdate_sound_channel_getVolumeModulator(Cranked *cranked, SoundChannel channel) {
-@@ -3227,11 +4095,12 @@ SynthSignalValue cranked::playdate_sound_channel_getVolumeModulator(Cranked *cra
+@@ -3227,11 +4097,12 @@ SynthSignalValue cranked::playdate_sound_channel_getVolumeModulator(Cranked *cra
  }
  
  void cranked::playdate_sound_channel_setPan(Cranked *cranked, SoundChannel channel, float pan) {
@@ -22915,7 +23053,7 @@ index e6f8222..b5a40b9 100644
  }
  
  SynthSignalValue cranked::playdate_sound_channel_getPanModulator(Cranked *cranked, SoundChannel channel) {
-@@ -3247,16 +4116,19 @@ SynthSignalValue cranked::playdate_sound_channel_getWetLevelSignal(Cranked *cran
+@@ -3247,16 +4118,19 @@ SynthSignalValue cranked::playdate_sound_channel_getWetLevelSignal(Cranked *cran
  }
  
  SoundSource_32 *cranked::playdate_sound_channel_getOutputAsSource(Cranked *cranked, SoundChannel_32 *channel) {
@@ -22939,7 +23077,7 @@ index e6f8222..b5a40b9 100644
  }
  
  SoundChannel cranked::playdate_sound_getDefaultChannel(Cranked *cranked) {
-@@ -3267,9 +4139,7 @@ int32 cranked::playdate_sound_addChannel(Cranked *cranked, SoundChannel channel)
+@@ -3267,9 +4141,7 @@ int32 cranked::playdate_sound_addChannel(Cranked *cranked, SoundChannel channel)
      if (channel == cranked->audio.mainChannel)
          return false;
      auto &activeChannels = cranked->audio.channels;
@@ -22950,7 +23088,7 @@ index e6f8222..b5a40b9 100644
  }
  
  int32 cranked::playdate_sound_removeChannel(Cranked *cranked, SoundChannel channel) {
-@@ -3279,9 +4149,9 @@ int32 cranked::playdate_sound_removeChannel(Cranked *cranked, SoundChannel chann
+@@ -3279,9 +4151,9 @@ int32 cranked::playdate_sound_removeChannel(Cranked *cranked, SoundChannel chann
      return success;
  }
  
@@ -22962,7 +23100,7 @@ index e6f8222..b5a40b9 100644
      cranked->audio.micCallbackSource = (MicSource)forceInternal;
      return (int)MicSource::Autodetect; // Todo
  }
-@@ -3299,11 +4169,15 @@ void cranked::playdate_sound_setOutputsActive(Cranked *cranked, int32 headphone,
+@@ -3299,11 +4171,15 @@ void cranked::playdate_sound_setOutputsActive(Cranked *cranked, int32 headphone,
  
  int32 cranked::playdate_sound_removeSource(Cranked *cranked, SoundSource sourceDerived) {
      auto source = cranked->audio.sourceFromDerived(sourceDerived);
@@ -22979,7 +23117,7 @@ index e6f8222..b5a40b9 100644
      return false;
  }
  
-@@ -3316,18 +4190,35 @@ int32 cranked::playdate_display_getHeight(Cranked *cranked) {
+@@ -3316,18 +4192,35 @@ int32 cranked::playdate_display_getHeight(Cranked *cranked) {
  }
  
  void cranked::playdate_display_setRefreshRate(Cranked *cranked, float rate) {
@@ -23017,7 +23155,7 @@ index e6f8222..b5a40b9 100644
  }
  
  void cranked::playdate_display_setMosaic(Cranked *cranked, uint32 x, uint32 y) {
-@@ -3348,7 +4239,7 @@ float cranked::playdate_display_getRefreshRate(Cranked *cranked) {
+@@ -3348,7 +4241,7 @@ float cranked::playdate_display_getRefreshRate(Cranked *cranked) {
  }
  
  float cranked::playdate_display_getFPS(Cranked *cranked) {
@@ -23026,7 +23164,7 @@ index e6f8222..b5a40b9 100644
  }
  
  int32 cranked::playdate_scoreboards_addScore(Cranked *cranked, uint8 *boardId, uint32 value, cref_t callback) {
-@@ -3383,13 +4274,18 @@ void cranked::playdate_scoreboards_freeScoresList(Cranked *cranked, PDScoresList
+@@ -3383,13 +4276,18 @@ void cranked::playdate_scoreboards_freeScoresList(Cranked *cranked, PDScoresList
      // Todo
  }
  
@@ -23047,7 +23185,7 @@ index e6f8222..b5a40b9 100644
      auto conn = cranked->heap.construct<HTTPConnection_32>(*cranked);
      conn->server = (char *)server;
      conn->port = port > 0 ? port : useSsl ? 443 : 80;
-@@ -3419,11 +4315,11 @@ void cranked::playdate_http_setByteRange(Cranked *cranked, HttpConnection conn,
+@@ -3419,11 +4317,11 @@ void cranked::playdate_http_setByteRange(Cranked *cranked, HttpConnection conn,
      conn->byteRangeEnd = end;
  }
  
@@ -23061,7 +23199,7 @@ index e6f8222..b5a40b9 100644
      return conn->userdata;
  }
  
-@@ -3494,9 +4390,10 @@ void cranked::playdate_http_setConnectionClosedCallback(Cranked *cranked, HttpCo
+@@ -3494,9 +4392,10 @@ void cranked::playdate_http_setConnectionClosedCallback(Cranked *cranked, HttpCo
      conn->closedCallback = callback;
  }
  
@@ -23074,7 +23212,7 @@ index e6f8222..b5a40b9 100644
      return (int)AccessReply::Ask; // Todo: Safe to call immediately? Return value?
  }
  
-@@ -3525,15 +4422,17 @@ void cranked::playdate_tcp_setConnectTimeout(Cranked *cranked, TcpConnection con
+@@ -3525,15 +4424,17 @@ void cranked::playdate_tcp_setConnectTimeout(Cranked *cranked, TcpConnection con
      conn->connectTimeout = ms;
  }
  
@@ -23095,7 +23233,7 @@ index e6f8222..b5a40b9 100644
      conn->openCallback = callback;
      conn->openUserdata = userdata;
      return (int)conn->open();
-@@ -3576,7 +4475,7 @@ uint32_t cranked::playdate_tcp_getSentBytesPending(Cranked *cranked, TCPConnecti
+@@ -3576,7 +4477,7 @@ uint32_t cranked::playdate_tcp_getSentBytesPending(Cranked *cranked, TCPConnecti
  }
  
  int32 cranked::playdate_network_getStatus(Cranked *cranked) {
