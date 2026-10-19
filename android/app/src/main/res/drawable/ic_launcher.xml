@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- a yellow handheld with a screen and a crank (drawn for this app) -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp" android:height="48dp" android:viewportWidth="48" android:viewportHeight="48">
+    <path android:fillColor="#FFC833" android:pathData="M8,6h28a4,4 0,0 1,4 4v28a4,4 0,0 1,-4 4h-28a4,4 0,0 1,-4 -4v-28a4,4 0,0 1,4 -4z" />
+    <path android:fillColor="#2B2B2B" android:pathData="M9,10h26v16h-26z" />
+    <path android:fillColor="#D8D6CF" android:pathData="M11,12h22v12h-22z" />
+    <path android:fillColor="#2B2B2B" android:pathData="M40,20h4v3h-4z" />
+    <path android:fillColor="#2B2B2B" android:pathData="M42,23h2v8h-2z" />
+    <path android:fillColor="#2B2B2B" android:pathData="M12,33h6v2h-6zM14,31h2v6h-2z" />
+    <path android:fillColor="#2B2B2B" android:pathData="M28,34m-2,0a2,2 0,1 1,4 0a2,2 0,1 1,-4 0M33,32m-2,0a2,2 0,1 1,4 0a2,2 0,1 1,-4 0" />
+</vector>

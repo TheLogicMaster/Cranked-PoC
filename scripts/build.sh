@@ -9,6 +9,8 @@
 #   libretro        the libretro core, with Unicorn's JIT
 #   libretro-nojit  the libretro core with the ARM interpreter
 #   libretro-android  the libretro core for Android, interpreter (ANDROID_NDK_HOME; ANDROID_ABI, default arm64-v8a)
+#   android         the Android app, an APK (interpreter; ANDROID_NDK_HOME, ANDROID_HOME, Gradle 8.9+ with JDK 17;
+#                   ANDROID_ABIS, default arm64-v8a; GRADLE, default gradle)
 #   appimage        a Linux AppImage of the desktop front end (builds desktop first; needs appimagetool)
 #   runner          the headless test runner
 # Results go to dist/<target>/. Build folders are build/<target>/. Environment: CONFIG (Release), JOBS, CMAKE_EXTRA.
@@ -24,11 +26,11 @@ TARGETS=()
 while [ $# -gt 0 ]; do
   case $1 in
     --sdk) SDK=$2; shift 2;;
-    -h|--help) sed -n '2,18p' "$0"; exit 0;;
+    -h|--help) sed -n '2,20p' "$0"; exit 0;;
     *) TARGETS+=("$1"); shift;;
   esac
 done
-[ ${#TARGETS[@]} -gt 0 ] || { sed -n '2,18p' "$0"; exit 1; }
+[ ${#TARGETS[@]} -gt 0 ] || { sed -n '2,20p' "$0"; exit 1; }
 
 JOBS=${JOBS:-$(nproc 2> /dev/null || sysctl -n hw.ncpu 2> /dev/null || echo 4)}
 GEN=(); command -v ninja > /dev/null && GEN=(-G Ninja)
@@ -125,6 +127,26 @@ for t in "${TARGETS[@]}"; do
         -DANDROID_ABI=${ANDROID_ABI:-arm64-v8a} -DANDROID_PLATFORM=android-24 -DUSE_UNICORN=OFF -DUSE_INTERPRETER=ON \
         -DUSE_SOCKETS=OFF -DUSE_CAPSTONE=OFF -DSKIP_DESKTOP=ON -DSKIP_LIBRETRO=OFF
       collect $t "$ROOT/build/$t/libretro/*cranked_libretro*" "$ROOT/packaging/cranked_libretro.info"
+      ;;
+    android)
+      NDK=${ANDROID_NDK_HOME:-${ANDROID_NDK_LATEST_HOME:-}}
+      [ -f "$NDK/build/cmake/android.toolchain.cmake" ] || { echo "the Android NDK is needed (ANDROID_NDK_HOME)" >&2; exit 1; }
+      # the JNI library (Cranked's java/ binding) for each ABI, with the interpreter as in the libretro core for
+      # Android, then the app around it (android/)
+      JNILIBS=$ROOT/android/app/src/main/jniLibs
+      rm -rf "$JNILIBS"
+      for abi in ${ANDROID_ABIS:-arm64-v8a}; do
+        native android-$abi cranked_java -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
+          -DANDROID_ABI=$abi -DANDROID_PLATFORM=android-24 -DUSE_UNICORN=OFF -DUSE_INTERPRETER=ON \
+          -DUSE_SOCKETS=OFF -DUSE_CAPSTONE=OFF -DSKIP_JAVA=OFF -DSKIP_DESKTOP=ON -DSKIP_LIBRETRO=ON
+        mkdir -p "$JNILIBS/$abi"
+        cp "$ROOT/build/android-$abi/java/libcranked_java.so" "$JNILIBS/$abi/"
+        "$NDK"/toolchains/llvm/prebuilt/*/bin/llvm-strip "$JNILIBS/$abi/libcranked_java.so"
+      done
+      (cd "$ROOT/android" && ${GRADLE:-gradle} --no-daemon assembleRelease)
+      mkdir -p "$ROOT/dist/android"
+      cp "$ROOT/android/app/build/outputs/apk/release/app-release.apk" "$ROOT/dist/android/Cranked-PoC.apk"
+      echo "dist/android:"; ls "$ROOT/dist/android"
       ;;
     appimage)
       [ -x "$ROOT/dist/desktop/cranked_desktop" ] || "$0" desktop

@@ -1,0 +1,18 @@
+// The Android app of the Cranked Proof of Concept. scripts/build.sh android builds the native library into
+// app/src/main/jniLibs/ first, then runs Gradle here.
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+rootProject.name = 'cranked-poc-android'
+include ':app'

@@ -151,6 +151,35 @@ jobs:
           name: cranked-poc-android-libretro
           path: dist/libretro-android
 
+  android:
+    needs: sdk-assets
+    runs-on: ubuntu-24.04
+    continue-on-error: true # experimental
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cranked at the pinned commit, patched
+        shell: bash
+        run: scripts/fetch-cranked.sh
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdk-assets
+          path: cranked/core/resources
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.14.3
+      - name: Build the Android app (arm64, interpreter)
+        run: |
+          sudo apt-get install -y ninja-build
+          scripts/build.sh android
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cranked-poc-android
+          path: dist/android
+
   pages:
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     needs: web

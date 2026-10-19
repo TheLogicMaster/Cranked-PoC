@@ -23,7 +23,7 @@ your browser).
 - **Lua and C games**: C games run on Unicorn's JIT on the desktop, or on the built-in ARM interpreter where a JIT is
   not possible (the browser, iOS, consoles).
 - **Front ends**: a desktop app (Windows, macOS, Linux; also as an AppImage and a Flatpak) with a debugger, a libretro
-  core (RetroArch; an Android build is experimental), and the browser build (installable, works offline, touch and gamepad controls).
+  core (RetroArch; an Android build is experimental), an Android app (experimental), and the browser build (installable, works offline, touch and gamepad controls).
 - **Much closer to the real thing**: hundreds of behaviours measured against the SDK 3.1.1 Simulator and fixed; see
   [Cranked APIs](https://github.com/TheLogicMaster/Cranked-APIs).
 
@@ -49,6 +49,7 @@ The games shown are [Singularity](https://github.com/Rani367/singularity) by Ran
 | `scripts/wrap-game.sh` | Wraps a game and the desktop front end into one executable, a macOS app or an AppImage |
 | `scripts/package-linux.sh` | AppImage and Flatpak of the desktop front end |
 | `scripts/docker-build.sh`, `docker/` | The same builds in Docker, with your SDK passed in |
+| `android/` | The Android app (Gradle project; the native library comes from `scripts/build.sh android`) |
 | `packaging/` | The Flatpak manifest, desktop entry, icon, the libretro core's RetroArch info file, and the optional download proxy (`download-proxy/`) |
 | `site/` | The hosted site's settings (`site.json`), the games it hosts (`games.tsv`) and the games it links to (`links.tsv`) |
 | `docs/screenshots/` | The pictures in this file |
@@ -92,6 +93,7 @@ Targets:
 | `libretro` | A libretro core (RetroArch and other frontends), with the JIT |
 | `libretro-nojit` | A libretro core with the interpreter, for platforms that forbid JIT (iOS, consoles) |
 | `libretro-android` | The libretro core for Android (arm64 by default, interpreter; needs the Android NDK) |
+| `android` | The Android app, `dist/android/Cranked-PoC.apk` (arm64 by default, interpreter; needs the Android NDK and SDK, JDK 17 and Gradle 8.9 or later; not in Docker) |
 | `appimage` | A Linux AppImage of the desktop front end (needs appimagetool); written to `dist/packages/` |
 | `web` | The browser front end (Emscripten 3.1.52 or later; set `EMSDK` or put `emcc` on the PATH) |
 | `runner` | The headless test runner (prints a game's console output; used to compare against the Simulator) |
@@ -128,6 +130,21 @@ shoulder buttons for the crank. Save data goes to `./appData` when that folder e
 executable (the zipped game appended to it), a macOS `.app`, or an AppImage, by the output's name. The wrapped game
 starts at once, fills the window, and keeps its saves in the user's data folder. `scripts/package-linux.sh` makes an
 AppImage and a Flatpak of the emulator itself. Only wrap games whose licenses allow it.
+
+## The Android app
+
+`android/` is a small Android app (plain Java, no libraries) around Cranked's JNI binding (`java/` in Cranked):
+`scripts/build.sh android` builds the native library for each ABI in `ANDROID_ABIS` into
+`android/app/src/main/jniLibs/` and then the APK with Gradle. The release APK is signed with the debug key, so it
+installs as is (`adb install dist/android/Cranked-PoC.apk`); sign it with your own key to publish it. Android 7.0
+(API 24) or later.
+
+The app opens a zipped game (`.pdx.zip`, or a zip of a `.pdx` folder) from the system file picker, or one another app
+opens or shares with it, and reopens the last game on the next start. Games and their save data are kept in the
+app's own storage. The Back button opens the app menu (open a game, restart it, show or hide the touch controls,
+quit). Touch controls: a d-pad on the left, B and A on the right, the menu button in the top-left corner, and the
+crank, a wheel on the right that turns with the finger (double-tap it to dock or undock the crank). Gamepads and
+keyboards map as on the desktop. C games run on the ARM interpreter, as in the libretro core for Android.
 
 ## Hosting the web build
 
