@@ -1,14 +1,46 @@
-# Builds every Proof of Concept target. The SDK assets are prepared once on Linux (the SDK's pdc compiles them) and
-# shared with the other jobs. The web build is published to the gh-pages branch from the default branch.
+# Builds the Proof of Concept targets. Runs only when started by hand (Actions > build > Run workflow), with a
+# checkbox per target, so a run uses only the runner time it needs (Windows and macOS minutes count double and ten
+# times on private repositories). The SDK assets are prepared once on Linux (the SDK's pdc compiles them) and shared
+# with the other jobs. The web build can be published to the gh-pages branch from the default branch.
 # Every job's output is uploaded or published, so the assets are prepared for distribution (SDK_ASSETS=fonts): only
 # the Playdate fonts (CC BY 4.0) come from the SDK, and its other assets are replaced by plain stand-ins.
 name: build
 
 on:
-  push:
-    branches: [main]
-  pull_request:
   workflow_dispatch:
+    inputs:
+      linux:
+        description: Desktop and libretro for Linux (and the AppImage)
+        type: boolean
+        default: true
+      windows:
+        description: Desktop and libretro for Windows
+        type: boolean
+        default: false
+      macos:
+        description: Desktop and libretro for macOS
+        type: boolean
+        default: false
+      flatpak:
+        description: Flatpak (needs Linux)
+        type: boolean
+        default: false
+      web:
+        description: Web build
+        type: boolean
+        default: true
+      publish:
+        description: Publish the web site to gh-pages (needs Web; default branch only)
+        type: boolean
+        default: false
+      android:
+        description: Android app
+        type: boolean
+        default: false
+      android-libretro:
+        description: libretro core for Android
+        type: boolean
+        default: false
 
 env:
   SDK_URL: https://download.panic.com/playdate_sdk/Linux/PlaydateSDK-3.1.1.tar.gz
@@ -34,12 +66,27 @@ jobs:
           include-hidden-files: true # .sdk-assets, which tells build.sh how the assets were prepared
           retention-days: 1
 
+  # the operating systems picked for the native job
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      os: ${{ steps.os.outputs.os }}
+    steps:
+      - id: os
+        run: |
+          list=()
+          [ "${{ inputs.linux }}" = true ] && list+=('"ubuntu-24.04"')
+          [ "${{ inputs.windows }}" = true ] && list+=('"windows-2022"')
+          [ "${{ inputs.macos }}" = true ] && list+=('"macos-15"')
+          echo "os=[$(IFS=,; echo "${list[*]}")]" >> "$GITHUB_OUTPUT"
+
   native:
-    needs: sdk-assets
+    needs: [plan, sdk-assets]
+    if: needs.plan.outputs.os != '[]'
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, windows-2022, macos-15]
+        os: ${{ fromJSON(needs.plan.outputs.os) }}
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -90,6 +137,7 @@ jobs:
 
   flatpak:
     needs: native
+    if: inputs.linux && inputs.flatpak
     runs-on: ubuntu-24.04
     container:
       image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-24.08
@@ -109,6 +157,7 @@ jobs:
 
   web:
     needs: sdk-assets
+    if: inputs.web
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -131,6 +180,7 @@ jobs:
 
   android-libretro:
     needs: sdk-assets
+    if: inputs.android-libretro
     runs-on: ubuntu-24.04
     continue-on-error: true # experimental
     steps:
@@ -153,6 +203,7 @@ jobs:
 
   android:
     needs: sdk-assets
+    if: inputs.android
     runs-on: ubuntu-24.04
     continue-on-error: true # experimental
     steps:
@@ -183,7 +234,7 @@ jobs:
           path: dist/android
 
   pages:
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    if: inputs.web && inputs.publish && github.ref == 'refs/heads/main'
     needs: web
     runs-on: ubuntu-24.04
     permissions:

@@ -53,7 +53,7 @@ The games shown are [Singularity](https://github.com/Rani367/singularity) by Ran
 | `packaging/` | The Flatpak manifest, desktop entry, icon, the libretro core's RetroArch info file, and the optional download proxy (`download-proxy/`) |
 | `site/` | The hosted site's settings (`site.json`), the games it hosts (`games.tsv`) and the games it links to (`links.tsv`) |
 | `docs/screenshots/` | The pictures in this file |
-| `.github/workflows/` | Builds every target on Linux, Windows and macOS, and publishes the web build to the `gh-pages` branch |
+| `.github/workflows/` | Builds the targets on Linux, Windows and macOS, and publishes the web build to the `gh-pages` branch; it runs when started by hand (Actions > build > Run workflow), with a checkbox per target |
 
 The Playdate SDK is not included. Its assets are taken from your own copy of SDK 3.1.1 at build time.
 
@@ -174,7 +174,7 @@ for games that may be redistributed.
 `site.json` (optional) can also set `"title"`, `"subtitle"`, `"catalog"` (the game list's address) and `"proxy"`. Players can
 export a game's save data as a zip and import it again. Gamepads (standard mapping), keyboard and touch work.
 
-The workflow publishes the site (`scripts/make-site.sh`) to the `gh-pages` branch; turn on GitHub Pages for that
+The workflow publishes the site (`scripts/make-site.sh`) to the `gh-pages` branch when run with Web and Publish checked; turn on GitHub Pages for that
 branch in the repository settings. It also uploads the finished site as the `cranked-poc-site` artifact. To make and
 try the site locally (the page must be served over HTTP, not opened as a file):
 
