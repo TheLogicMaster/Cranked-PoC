@@ -5450,10 +5450,28 @@ index 8f03efc..223366f 100644
      };
  
 diff --git a/core/CMakeLists.txt b/core/CMakeLists.txt
-index 875f6d3..ea5062e 100644
+index 875f6d3..82a4901 100644
 --- a/core/CMakeLists.txt
 +++ b/core/CMakeLists.txt
-@@ -79,14 +79,27 @@ else ()
+@@ -16,8 +16,15 @@ endif()
+ 
+ include(${CMAKE_SOURCE_DIR}/cmake/get_cpm.cmake)
+ 
+-find_package(Python3)
+-find_package(PythonInterp)
++# the Python that runs the resource embedding script: Python 3's interpreter as FindPython3 finds it (it checks that
++# the program runs, so a pyenv "python" shim with no version selected is skipped), else the older FindPythonInterp's
++find_package(Python3 COMPONENTS Interpreter)
++if (Python3_Interpreter_FOUND)
++    set(EMBED_PYTHON ${Python3_EXECUTABLE})
++else ()
++    find_package(PythonInterp)
++    set(EMBED_PYTHON ${PYTHON_EXECUTABLE})
++endif ()
+ 
+ find_package(ZLIB QUIET)
+ find_package(unicorn QUIET)
+@@ -79,14 +86,27 @@ else ()
      list(APPEND CRANKED_INCLUDES libs/zlib)
  endif ()
  
@@ -5483,7 +5501,7 @@ index 875f6d3..ea5062e 100644
      set(ASIO_TAG "asio-1-38-2")
      add_subdirectory(libs/asio)
  endif ()
-@@ -117,12 +130,21 @@ if (MSVC)
+@@ -117,12 +137,21 @@ if (MSVC)
      set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /MP /Zc:__cplusplus")
      list(APPEND CRANKED_LIBS ws2_32 wsock32)
      list(APPEND CRANKED_DEFINES _WIN32_WINNT=0x0A00)
@@ -5505,7 +5523,7 @@ index 875f6d3..ea5062e 100644
  endforeach ()
  
  set(cranked_sources
-@@ -131,6 +153,7 @@ set(cranked_sources
+@@ -131,6 +160,7 @@ set(cranked_sources
          Cranked.cpp
          Debugger.cpp
          Files.cpp
@@ -5513,7 +5531,7 @@ index 875f6d3..ea5062e 100644
          Graphics.cpp
          HeapAllocator.cpp
          LuaEngine.cpp
-@@ -143,12 +166,32 @@ set(cranked_sources
+@@ -143,17 +173,37 @@ set(cranked_sources
          Runtime.cpp
          Utils.cpp
          gen/PlaydateFunctionMappings.cpp
@@ -5546,7 +5564,13 @@ index 875f6d3..ea5062e 100644
  
  function(embed_resource resource_file header_file variable_name args needed_for)
      add_custom_command(
-@@ -169,15 +212,39 @@ embed_resource("crank-frames-2x.pdt" "CrankFrames2X.hpp" "CRANK_FRAMES_2X" "" "R
+             OUTPUT ${CMAKE_CURRENT_SOURCE_DIR}/gen/${header_file}
+-            COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/embed_resource.py ${CMAKE_CURRENT_SOURCE_DIR}/resources/${resource_file} ${CMAKE_CURRENT_SOURCE_DIR}/gen/${header_file} ${variable_name} ${args}
++            COMMAND ${EMBED_PYTHON} ${CMAKE_SOURCE_DIR}/scripts/embed_resource.py ${CMAKE_CURRENT_SOURCE_DIR}/resources/${resource_file} ${CMAKE_CURRENT_SOURCE_DIR}/gen/${header_file} ${variable_name} ${args}
+             DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/resources/${resource_file}
+             COMMENT Processing '${resource_file}'
+     )
+@@ -169,15 +219,39 @@ embed_resource("crank-frames-2x.pdt" "CrankFrames2X.hpp" "CRANK_FRAMES_2X" "" "R
  embed_resource("crank-frames-4x.pdt" "CrankFrames4X.hpp" "CRANK_FRAMES_4X" "" "Rom.cpp")
  embed_resource("crank-frames-8x.pdt" "CrankFrames8X.hpp" "CRANK_FRAMES_8X" "" "Rom.cpp")
  embed_resource("crank-notice-bubble.pdi" "CrankNoticeBubble.hpp" "CRANK_NOTICE_BUBBLE" "" "Rom.cpp")
