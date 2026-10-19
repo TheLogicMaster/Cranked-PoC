@@ -212,11 +212,9 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-      # before Cranked is fetched: setup-gradle checks every Gradle wrapper in the workspace, and Cranked's SDL
-      # submodule carries one it does not know (this project uses no wrapper)
+      # before Cranked is fetched: setup-gradle checks every Gradle wrapper in the workspace (android/gradlew's
+      # included), and Cranked's SDL submodule carries one it does not know
       - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: 8.14.3
       - name: Cranked at the pinned commit, patched
         shell: bash
         run: scripts/fetch-cranked.sh

@@ -9,8 +9,8 @@
 #   libretro        the libretro core, with Unicorn's JIT
 #   libretro-nojit  the libretro core with the ARM interpreter
 #   libretro-android  the libretro core for Android, interpreter (ANDROID_NDK_HOME; ANDROID_ABI, default arm64-v8a)
-#   android         the Android app, an APK (interpreter; ANDROID_NDK_HOME (r26+), ANDROID_HOME, Gradle 8.9+, JDK 17;
-#                   ANDROID_ABIS, default arm64-v8a; GRADLE, default gradle)
+#   android         the Android app, an APK (interpreter; ANDROID_NDK_HOME (r26+), ANDROID_HOME, JDK 17;
+#                   ANDROID_ABIS, default arm64-v8a; GRADLE, default android/gradlew)
 #   appimage        a Linux AppImage of the desktop front end (builds desktop first; needs appimagetool)
 #   runner          the headless test runner
 # Results go to dist/<target>/. Build folders are build/<target>/. Environment: CONFIG (Release), JOBS, CMAKE_EXTRA.
@@ -72,8 +72,9 @@ case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) windows_zlib;; esac
 
 android_ndk() { # sets NDK: ANDROID_NDK_HOME, else the newest NDK in the SDK's ndk/ folder; r26 or later
   NDK=${ANDROID_NDK_HOME:-${ANDROID_NDK_LATEST_HOME:-}}
-  if [ -z "$NDK" ] && [ -d "${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}/ndk" ]; then
-    NDK=$(ls -d "${ANDROID_HOME:-$ANDROID_SDK_ROOT}"/ndk/*/ 2> /dev/null | sort -V | tail -1); NDK=${NDK%/}
+  local sdk=${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Android/Sdk}}
+  if [ -z "$NDK" ] && [ -d "$sdk/ndk" ]; then
+    NDK=$(ls -d "$sdk"/ndk/*/ 2> /dev/null | sort -V | tail -1); NDK=${NDK%/}
   fi
   [ -f "$NDK/build/cmake/android.toolchain.cmake" ] || { echo "the Android NDK is needed (ANDROID_NDK_HOME)" >&2; exit 1; }
   # older NDKs' C++ library lacks <format> and C++20 string conversions the code uses
@@ -154,7 +155,10 @@ for t in "${TARGETS[@]}"; do
         cp "$ROOT/build/android-$abi/java/libcranked_java.so" "$JNILIBS/$abi/"
         "$NDK"/toolchains/llvm/prebuilt/*/bin/llvm-strip "$JNILIBS/$abi/libcranked_java.so"
       done
-      (cd "$ROOT/android" && ${GRADLE:-gradle} --no-daemon assembleRelease)
+      # the Android SDK for Gradle: ANDROID_HOME, else Android Studio's default place
+      if [ -z "${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}" ] && [ -d "$HOME/Android/Sdk" ]; then export ANDROID_HOME=$HOME/Android/Sdk; fi
+      # the Gradle wrapper (android/gradlew) downloads its Gradle the first time; GRADLE picks another
+      (cd "$ROOT/android" && ${GRADLE:-./gradlew} --no-daemon assembleRelease)
       mkdir -p "$ROOT/dist/android"
       cp "$ROOT/android/app/build/outputs/apk/release/app-release.apk" "$ROOT/dist/android/Cranked-PoC.apk"
       echo "dist/android:"; ls "$ROOT/dist/android"
