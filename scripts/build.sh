@@ -9,7 +9,7 @@
 #   libretro        the libretro core, with Unicorn's JIT
 #   libretro-nojit  the libretro core with the ARM interpreter
 #   libretro-android  the libretro core for Android, interpreter (ANDROID_NDK_HOME; ANDROID_ABI, default arm64-v8a)
-#   android         the Android app, an APK (interpreter; ANDROID_NDK_HOME, ANDROID_HOME, Gradle 8.9+ with JDK 17;
+#   android         the Android app, an APK (interpreter; ANDROID_NDK_HOME (r26+), ANDROID_HOME, Gradle 8.9+, JDK 17;
 #                   ANDROID_ABIS, default arm64-v8a; GRADLE, default gradle)
 #   appimage        a Linux AppImage of the desktop front end (builds desktop first; needs appimagetool)
 #   runner          the headless test runner
@@ -70,6 +70,19 @@ windows_zlib() {
 }
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) windows_zlib;; esac
 
+android_ndk() { # sets NDK: ANDROID_NDK_HOME, else the newest NDK in the SDK's ndk/ folder; r26 or later
+  NDK=${ANDROID_NDK_HOME:-${ANDROID_NDK_LATEST_HOME:-}}
+  if [ -z "$NDK" ] && [ -d "${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}/ndk" ]; then
+    NDK=$(ls -d "${ANDROID_HOME:-$ANDROID_SDK_ROOT}"/ndk/*/ 2> /dev/null | sort -V | tail -1); NDK=${NDK%/}
+  fi
+  [ -f "$NDK/build/cmake/android.toolchain.cmake" ] || { echo "the Android NDK is needed (ANDROID_NDK_HOME)" >&2; exit 1; }
+  # older NDKs' C++ library lacks <format> and C++20 string conversions the code uses
+  local major; major=$(sed -n 's/^Pkg.Revision *= *\([0-9]*\).*/\1/p' "$NDK/source.properties" 2> /dev/null)
+  if [ -n "$major" ] && [ "$major" -lt 26 ]; then
+    echo "the Android NDK in $NDK is version $major; r26 or later is needed (the CI and Docker builds use r27)" >&2
+    exit 1
+  fi
+}
 native() { # <target> <cmake target> <extra options...>
   local t=$1 ct=$2; shift 2
   cmake -S "$CR" -B "$ROOT/build/$t" "${GEN[@]}" "${COMMON[@]}" "$@"
@@ -121,16 +134,14 @@ for t in "${TARGETS[@]}"; do
       collect $t "$ROOT/build/$t/libretro/*cranked_libretro*" "$ROOT/build/$t/libretro/$CONFIG/*cranked_libretro*" "$ROOT/packaging/cranked_libretro.info"
       ;;
     libretro-android)
-      NDK=${ANDROID_NDK_HOME:-${ANDROID_NDK_LATEST_HOME:-}}
-      [ -f "$NDK/build/cmake/android.toolchain.cmake" ] || { echo "the Android NDK is needed (ANDROID_NDK_HOME)" >&2; exit 1; }
+      android_ndk
       native $t cranked_libretro -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
         -DANDROID_ABI=${ANDROID_ABI:-arm64-v8a} -DANDROID_PLATFORM=android-24 -DUSE_UNICORN=OFF -DUSE_INTERPRETER=ON \
         -DUSE_SOCKETS=OFF -DUSE_CAPSTONE=OFF -DSKIP_DESKTOP=ON -DSKIP_LIBRETRO=OFF
       collect $t "$ROOT/build/$t/libretro/*cranked_libretro*" "$ROOT/packaging/cranked_libretro.info"
       ;;
     android)
-      NDK=${ANDROID_NDK_HOME:-${ANDROID_NDK_LATEST_HOME:-}}
-      [ -f "$NDK/build/cmake/android.toolchain.cmake" ] || { echo "the Android NDK is needed (ANDROID_NDK_HOME)" >&2; exit 1; }
+      android_ndk
       # the JNI library (Cranked's java/ binding) for each ABI, with the interpreter as in the libretro core for
       # Android, then the app around it (android/)
       JNILIBS=$ROOT/android/app/src/main/jniLibs

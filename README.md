@@ -92,8 +92,8 @@ Targets:
 | `desktop-nojit` | The same with the ARM interpreter (no JIT) |
 | `libretro` | A libretro core (RetroArch and other frontends), with the JIT |
 | `libretro-nojit` | A libretro core with the interpreter, for platforms that forbid JIT (iOS, consoles) |
-| `libretro-android` | The libretro core for Android (arm64 by default, interpreter; needs the Android NDK) |
-| `android` | The Android app, `dist/android/Cranked-PoC.apk` (arm64 by default, interpreter; needs the Android NDK and SDK, JDK 17 and Gradle 8.9 or later; not in Docker) |
+| `libretro-android` | The libretro core for Android (arm64 by default, interpreter; needs the Android NDK r26 or later) |
+| `android` | The Android app, `dist/android/Cranked-PoC.apk` (arm64 by default, interpreter; needs the Android NDK r26 or later and the SDK, JDK 17 and Gradle 8.9 or later; not in Docker) |
 | `appimage` | A Linux AppImage of the desktop front end (needs appimagetool); written to `dist/packages/` |
 | `web` | The browser front end (Emscripten 3.1.52 or later; set `EMSDK` or put `emcc` on the PATH) |
 | `runner` | The headless test runner (prints a game's console output; used to compare against the Simulator) |
