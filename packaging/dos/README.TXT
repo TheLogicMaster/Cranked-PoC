@@ -32,6 +32,10 @@ available). Options:
     -q              no sound
     -t <seconds>    stop after this much game time
     -shot <file>    write the last frame to a BMP file when the game ends
+    -c <0-5>        the screen's colors: 0 Playdate, 1 bright room, 2 paper,
+                    3 Game Boy, 4 amber, 5 high contrast
+    -b              blend each frame with the one before, so pixels a game
+                    flickers to make grey are shown grey
 
 Keys
 ----
@@ -42,6 +46,8 @@ Keys
     Comma, period       turn the crank (the mouse turns it too)
     C                   dock or undock the crank
     P                   pause
+    F2                  the next colors
+    F3                  frame blending on or off
     F5                  restart the game
     F12                 save a screenshot, CRANKnnn.BMP
     Esc                 quit

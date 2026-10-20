@@ -24,12 +24,19 @@ your browser).
   not possible (the browser, iOS, consoles).
 - **Front ends**: a desktop app (Windows, macOS, Linux; also as an AppImage and a Flatpak) with a debugger, a libretro
   core (RetroArch; an Android build is experimental), an Android app (experimental), a DOS build (experimental), and the browser build (installable, works offline, touch and gamepad controls).
+- **The screen's look**: color presets, blending of flickered pixels into grey, the LCD's pixel grid and shadow, room
+  light, scanlines, and a drawn Playdate whose buttons light up and whose crank turns, in every front end (see
+  [The screen's look](#the-screens-look)).
 - **Much closer to the real thing**: hundreds of behaviours measured against the SDK 3.1.1 Simulator and fixed; see
   [Cranked APIs](https://github.com/TheLogicMaster/Cranked-APIs).
 
 | The web build | On a phone | The desktop app's debugger |
 | --- | --- | --- |
-| <img src="docs/screenshots/web.png" width="300" alt="The web build in a desktop browser"> | <img src="docs/screenshots/web-phone.png" width="150" alt="The web build on a phone, with touch controls and a crank dial"> | <img src="docs/screenshots/desktop-debugger.png" width="300" alt="The desktop app with registers, disassembly, buttons and crank windows"> |
+| <img src="docs/screenshots/web.png" width="300" alt="The web build in a desktop browser: the game inside a drawn yellow Playdate with its pixel grid and room light, and the Screen settings below"> | <img src="docs/screenshots/web-phone.png" width="150" alt="The web build on a phone: the drawn Playdate in Game Boy colors, with touch controls and a crank dial"> | <img src="docs/screenshots/desktop-debugger.png" width="300" alt="The desktop app with registers, disassembly, buttons and crank windows"> |
+
+| The screen's look | The DOS build |
+| --- | --- |
+| <img src="docs/screenshots/screen-effects.png" width="450" alt="A close-up of the pixel grid, pixel shadow and room light, beside the six color presets: Playdate, bright room, paper, Game Boy, amber and high contrast"> | <img src="docs/screenshots/dos.png" width="225" alt="The DOS build in DOSBox-X, in the amber colors"> |
 
 The games shown are [Singularity](https://github.com/Rani367/singularity) by Rani367 (MIT) and
 [Snooze or Lose](https://github.com/britalmeida/project_snooze) by Team Snooze (CC0).
@@ -133,6 +140,26 @@ executable (the zipped game appended to it), a macOS `.app`, or an AppImage, by 
 starts at once, fills the window, and keeps its saves in the user's data folder. `scripts/package-linux.sh` makes an
 AppImage and a Flatpak of the emulator itself. Only wrap games whose licenses allow it.
 
+## The screen's look
+
+`core/ScreenEffects` (in the patches) draws the screen for the front ends, on the CPU (the screen is 400x240 at one bit
+a pixel, so even at 3x it is cheap: about 1.5 ms a frame for the drawn device in the browser):
+
+| Effect | What it does |
+| --- | --- |
+| Colors | Playdate (the default), bright room, paper, Game Boy, amber, high contrast |
+| Blend frames | Mixes each frame with the one before, as the eye does with pixels a game flickers to make grey (it smears motion, so it is off by default) |
+| Pixel grid, pixel shadow | The gaps between the LCD's pixels, and the faint shadow dark pixels cast on the reflector behind them (2x and up) |
+| Room light | A lamp's sheen on the screen; a phone's tilt (browser) or the emulated accelerometer (desktop) moves it |
+| Scanlines | A CRT's scanlines and aperture grille: a novelty, since the Playdate never had a CRT (2x and up) |
+| Device frame | The screen inside a drawn Playdate, whose buttons light up when pressed and whose crank turns (it is not clickable) |
+
+Where they are: the desktop app's Screen menu; the browser build's Screen panel (kept in the browser); the libretro
+core's options (colors, blending, the LCD look or scanlines, room light, the device frame, and 2x or 3x for the effects
+that need it; RetroArch's own LCD and CRT shaders work on the plain screen as well); and in the DOS build, colors and
+blending (`-c <n>` and `-b`, or F2 and F3 while playing). The DOS build blends through the VGA's palette: a second
+plane holds the frame before.
+
 ## The Android app
 
 `android/` is a small Android app (plain Java, no libraries) around Cranked's JNI binding (`java/` in Cranked):
@@ -158,11 +185,13 @@ DJGPP, which `scripts/build-djgpp.sh [folder]` builds with [jwt27/build-gcc](htt
 
 It needs a Pentium or later and a VGA: the screen is shown at twice its size in the VESA 800x600 16-color mode, or
 at its own size in 640x480 (`-1`). A Sound Blaster 16 named by `BLASTER` plays the sound, and a mouse driver lets
-the mouse turn the crank. Keys are those of the desktop front end, plus P to pause, F5 to restart, F12 for a
-screenshot and Esc to quit. Games are opened from the command line (`CRANK game.zip`); a long file name driver
+the mouse turn the crank. Keys are those of the desktop front end, plus P to pause, F2 for the next colors, F3 to
+blend frames, F5 to restart, F12 for a screenshot and Esc to quit (`-c <0-5>` and `-b` set the colors and blending
+from the start). Games are opened from the command line (`CRANK game.zip`); a long file name driver
 (DOSLFN) is recommended, since save data go into folders named after bundle IDs. C games run on the ARM
-interpreter, so they need a fast machine (the SDK's Life example runs about 34 million ARM instructions a frame);
-Lua games are lighter. Tested in DOSBox-X; `CRANKED_LOG=<file>` writes the log and the game's console output to a
+interpreter, so even a recent PC booted into DOS runs only light ones at full speed (the SDK's Life example runs
+about 34 million ARM instructions a frame, and the interpreter does about 5 million a second in DOSBox-X on a modern
+host); Lua games are lighter, and simple ones run at full speed in DOSBox-X. Tested in DOSBox-X; `CRANKED_LOG=<file>` writes the log and the game's console output to a
 file.
 
 ## Hosting the web build
@@ -211,6 +240,8 @@ The changes are in `patches/`. In short:
   files, JSON, the C API's calling conventions);
 - an ARM interpreter, so C games run without a JIT (in the browser, or where JIT is not allowed);
 - the browser front end, the libretro core and the desktop front end made usable;
+- the screen's look (colors, frame blending, the LCD's grid and shadow, room light, scanlines, a drawn device) for
+  every front end;
 - a DOS front end and the changes for building with DJGPP (where `int32_t` is `long`, and a few C99 math and
   `<fenv.h>` functions are missing).
 

@@ -5451,7 +5451,7 @@ index 8f03efc..223366f 100644
      };
  
 diff --git a/core/CMakeLists.txt b/core/CMakeLists.txt
-index 875f6d3..f162a2b 100644
+index 875f6d3..c7e89a2 100644
 --- a/core/CMakeLists.txt
 +++ b/core/CMakeLists.txt
 @@ -5,6 +5,9 @@ project(core)
@@ -5543,7 +5543,7 @@ index 875f6d3..f162a2b 100644
  endforeach ()
  
  set(cranked_sources
-@@ -131,6 +166,7 @@ set(cranked_sources
+@@ -131,11 +166,13 @@ set(cranked_sources
          Cranked.cpp
          Debugger.cpp
          Files.cpp
@@ -5551,7 +5551,13 @@ index 875f6d3..f162a2b 100644
          Graphics.cpp
          HeapAllocator.cpp
          LuaEngine.cpp
-@@ -143,17 +179,37 @@ set(cranked_sources
+         LuaRuntime.cpp
+         Menu.cpp
++        ScreenEffects.cpp
+         NativeEngine.cpp
+         Networking.cpp
+         PathFinding.cpp
+@@ -143,17 +180,37 @@ set(cranked_sources
          Runtime.cpp
          Utils.cpp
          gen/PlaydateFunctionMappings.cpp
@@ -5590,7 +5596,7 @@ index 875f6d3..f162a2b 100644
              DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/resources/${resource_file}
              COMMENT Processing '${resource_file}'
      )
-@@ -169,15 +225,39 @@ embed_resource("crank-frames-2x.pdt" "CrankFrames2X.hpp" "CRANK_FRAMES_2X" "" "R
+@@ -169,15 +226,39 @@ embed_resource("crank-frames-2x.pdt" "CrankFrames2X.hpp" "CRANK_FRAMES_2X" "" "R
  embed_resource("crank-frames-4x.pdt" "CrankFrames4X.hpp" "CRANK_FRAMES_4X" "" "Rom.cpp")
  embed_resource("crank-frames-8x.pdt" "CrankFrames8X.hpp" "CRANK_FRAMES_8X" "" "Rom.cpp")
  embed_resource("crank-notice-bubble.pdi" "CrankNoticeBubble.hpp" "CRANK_NOTICE_BUBBLE" "" "Rom.cpp")
@@ -23397,6 +23403,492 @@ index e6f8222..9e15b2e 100644
  }
  
  void cranked::playdate_network_setEnabled(Cranked *cranked, uint8 flag, cref_t callback) {
+diff --git a/core/ScreenEffects.cpp b/core/ScreenEffects.cpp
+new file mode 100644
+index 0000000..e7cecb2
+--- /dev/null
++++ b/core/ScreenEffects.cpp
+@@ -0,0 +1,401 @@
++#include "ScreenEffects.hpp"
++#include "Cranked.hpp"
++
++#include <algorithm>
++#include <cmath>
++#include <cstring>
++#include <numbers>
++
++using namespace cranked;
++
++const ScreenColors cranked::SCREEN_COLOR_PRESETS[] = {
++    { "Playdate", 0xB0AEA7, 0x302E27 },
++    { "Bright room", 0xD3D0C8, 0x26241F },
++    { "Paper", 0xF2EFE6, 0x1C1B19 },
++    { "Game Boy", 0x9BBC0F, 0x0F380F },
++    { "Amber", 0xFFB000, 0x241700 },
++    { "High contrast", 0xFFFFFF, 0x000000 },
++};
++const int cranked::SCREEN_COLOR_PRESET_COUNT = (int) (sizeof(SCREEN_COLOR_PRESETS) / sizeof(SCREEN_COLOR_PRESETS[0]));
++
++// The drawn device, in screen pixels (the Playdate's body is about 76 x 74 mm around a 58.7 x 35.2 mm screen); the
++// crank is drawn from the side, beside the body
++static constexpr int SCREEN_LEFT = 60, SCREEN_TOP = 64, BODY_WIDTH = 520, BODY_HEIGHT = 504, CRANK_AREA = 110;
++
++namespace {
++    struct Rgb { float r, g, b; };
++
++    float length(float x, float y) { return std::sqrt(x * x + y * y); } // (DJGPP's library has no float hypot)
++
++    Rgb unpackRgb(uint32_t rgb) { return { (float) (rgb >> 16 & 0xFF), (float) (rgb >> 8 & 0xFF), (float) (rgb & 0xFF) }; }
++
++    uint32_t pack(int r, int g, int b, int a, ScreenEffects::Format format) {
++        r = std::clamp(r, 0, 255); g = std::clamp(g, 0, 255); b = std::clamp(b, 0, 255);
++        if (format == ScreenEffects::Format::XRGB)
++            return (uint32_t) r << 16 | (uint32_t) g << 8 | (uint32_t) b;
++        uint8_t bytes[4] = { (uint8_t) r, (uint8_t) g, (uint8_t) b, (uint8_t) a };
++        uint32_t v;
++        memcpy(&v, bytes, 4);
++        return v;
++    }
++
++    void unpack(uint32_t v, ScreenEffects::Format format, float &r, float &g, float &b, float &a) {
++        if (format == ScreenEffects::Format::XRGB) {
++            r = (float) (v >> 16 & 0xFF); g = (float) (v >> 8 & 0xFF); b = (float) (v & 0xFF); a = 255;
++            return;
++        }
++        uint8_t bytes[4];
++        memcpy(bytes, &v, 4);
++        r = bytes[0]; g = bytes[1]; b = bytes[2]; a = bytes[3];
++    }
++
++    // Drawing with antialiased edges: a shape gives each pixel's signed distance (in output pixels, negative inside)
++    struct Painter {
++        std::vector<uint32_t> &buffer;
++        int width, height;
++        ScreenEffects::Format format;
++
++        void blend(int x, int y, uint32_t rgb, float coverage) {
++            if (coverage <= 0 or x < 0 or y < 0 or x >= width or y >= height) return;
++            coverage = std::min(coverage, 1.0f);
++            auto &dst = buffer[(size_t) y * width + x];
++            float r, g, b, a;
++            unpack(dst, format, r, g, b, a);
++            Rgb s = unpackRgb(rgb);
++            if (a == 0) { // over the clear outside: the color itself, partly opaque
++                dst = pack((int) s.r, (int) s.g, (int) s.b, (int) (coverage * 255 + 0.5f), format);
++                return;
++            }
++            dst = pack((int) (r + (s.r - r) * coverage + 0.5f), (int) (g + (s.g - g) * coverage + 0.5f),
++                       (int) (b + (s.b - b) * coverage + 0.5f), (int) std::max(a, coverage * 255), format);
++        }
++
++        template<typename F>
++        void fill(float x0, float y0, float x1, float y1, uint32_t rgb, F distance) {
++            int ix0 = std::max(0, (int) std::floor(x0) - 1), iy0 = std::max(0, (int) std::floor(y0) - 1);
++            int ix1 = std::min(width - 1, (int) std::ceil(x1) + 1), iy1 = std::min(height - 1, (int) std::ceil(y1) + 1);
++            for (int y = iy0; y <= iy1; y++)
++                for (int x = ix0; x <= ix1; x++)
++                    blend(x, y, rgb, 0.5f - distance(x + 0.5f, y + 0.5f));
++        }
++
++        void roundRect(float x, float y, float w, float h, float radius, uint32_t rgb) {
++            float cx = x + w / 2, cy = y + h / 2, hx = w / 2 - radius, hy = h / 2 - radius;
++            fill(x, y, x + w, y + h, rgb, [=](float px, float py) {
++                float dx = std::max(std::abs(px - cx) - hx, 0.0f), dy = std::max(std::abs(py - cy) - hy, 0.0f);
++                float outside = std::sqrt(dx * dx + dy * dy);
++                float inside = std::min(std::max(std::abs(px - cx) - hx, std::abs(py - cy) - hy), 0.0f);
++                return outside + inside - radius;
++            });
++        }
++
++        void circle(float cx, float cy, float radius, uint32_t rgb) {
++            fill(cx - radius, cy - radius, cx + radius, cy + radius, rgb, [=](float px, float py) {
++                return length(px - cx, py - cy) - radius;
++            });
++        }
++
++        void ring(float cx, float cy, float radius, float thickness, uint32_t rgb) {
++            fill(cx - radius - thickness, cy - radius - thickness, cx + radius + thickness, cy + radius + thickness, rgb,
++                 [=](float px, float py) { return std::abs(length(px - cx, py - cy) - radius) - thickness / 2; });
++        }
++
++        void capsule(float ax, float ay, float bx, float by, float radius, uint32_t rgb) {
++            fill(std::min(ax, bx) - radius, std::min(ay, by) - radius, std::max(ax, bx) + radius, std::max(ay, by) + radius, rgb,
++                 [=](float px, float py) {
++                     float vx = bx - ax, vy = by - ay, wx = px - ax, wy = py - ay;
++                     float t = std::clamp((wx * vx + wy * vy) / std::max(vx * vx + vy * vy, 1e-6f), 0.0f, 1.0f);
++                     return length(wx - vx * t, wy - vy * t) - radius;
++                 });
++        }
++
++        // A 5x7 letter (only those the device needs), each dot size output pixels
++        void letter(char c, float x, float y, float size, uint32_t rgb) {
++            static const uint8_t A[7] = { 0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11 };
++            static const uint8_t B[7] = { 0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E };
++            const uint8_t *rows = c == 'A' ? A : B;
++            for (int row = 0; row < 7; row++)
++                for (int col = 0; col < 5; col++)
++                    if (rows[row] >> (4 - col) & 1)
++                        roundRect(x + col * size, y + row * size, size, size, size * 0.3f, rgb);
++        }
++    };
++
++    constexpr uint32_t BODY = 0xFFC400, BODY_EDGE = 0xE5A900, BODY_LABEL = 0xC08E00, BEZEL = 0x2A2722;
++    constexpr uint32_t BUTTON = 0x46433D, BUTTON_PRESSED = 0xA9A59B, BUTTON_RING = 0xFFF3C4;
++    constexpr uint32_t CRANK_DISC = 0xF2B900, CRANK_ARM = 0xFFD234, CRANK_KNOB = 0x46433D;
++
++    // Where the controls are, in screen pixels inside the body
++    constexpr float DPAD_X = 112, DPAD_Y = 404, DPAD_ARM = 40, DPAD_THICK = 27;
++    constexpr float B_X = 336, B_Y = 418, A_X = 428, A_Y = 386, AB_RADIUS = 31;
++    constexpr float MENU_X = 474, MENU_Y = 34, MENU_RADIUS = 13;
++    constexpr float CRANK_X = BODY_WIDTH + CRANK_AREA / 2.0f, CRANK_Y = SCREEN_TOP + 250, CRANK_RADIUS = 44;
++
++    // the parts of the device redrawn each frame: centers and half sizes, with room for the pressed buttons' rings
++    struct Area { float x, y, r; };
++    constexpr Area CONTROL_AREAS[] = {
++        { DPAD_X, DPAD_Y, DPAD_ARM + 4 }, { B_X, B_Y, AB_RADIUS + 8 }, { A_X, A_Y, AB_RADIUS + 8 },
++        { MENU_X, MENU_Y, MENU_RADIUS + 8 }, { CRANK_X, CRANK_Y, CRANK_RADIUS + 6 },
++    };
++}
++
++void ScreenEffects::outputSize(int scale, bool deviceFrame, int &width, int &height) {
++    width = (deviceFrame ? BODY_WIDTH + CRANK_AREA : DISPLAY_WIDTH) * scale;
++    height = (deviceFrame ? BODY_HEIGHT : DISPLAY_HEIGHT) * scale;
++}
++
++void ScreenEffects::buildFrame(int scale, Format format) {
++    int w, h;
++    outputSize(scale, true, w, h);
++    frameBackground.assign((size_t) w * h, pack(0x20, 0x20, 0x20, 0, format));
++    Painter p{ frameBackground, w, h, format };
++    float s = (float) scale;
++    // the crank's housing behind the body, then the body with a darker edge
++    p.roundRect((BODY_WIDTH - 30) * s, (CRANK_Y - 40) * s, 70 * s, 80 * s, 14 * s, BODY_EDGE);
++    p.roundRect(0, 0, BODY_WIDTH * s, BODY_HEIGHT * s, 38 * s, BODY_EDGE);
++    p.roundRect(3 * s, 2 * s, (BODY_WIDTH - 6) * s, (BODY_HEIGHT - 6) * s, 35 * s, BODY);
++    // the screen's dark surround
++    p.roundRect((SCREEN_LEFT - 6) * s, (SCREEN_TOP - 6) * s, (DISPLAY_WIDTH + 12) * s, (DISPLAY_HEIGHT + 12) * s, 6 * s, BEZEL);
++    // labels under A and B
++    float dot = 2.2f * s;
++    p.letter('B', B_X * s - 2.5f * dot, (B_Y + AB_RADIUS + 9) * s, dot, BODY_LABEL);
++    p.letter('A', A_X * s - 2.5f * dot, (A_Y + AB_RADIUS + 9) * s, dot, BODY_LABEL);
++    // the crank's disc, seen from the side
++    p.circle(CRANK_X * s, CRANK_Y * s, (CRANK_RADIUS + 3) * s, BODY_EDGE);
++    p.circle(CRANK_X * s, CRANK_Y * s, CRANK_RADIUS * s, CRANK_DISC);
++    frameScale = scale;
++    frameFormat = format;
++}
++
++void ScreenEffects::drawControls(Cranked &cranked, int scale, Format format) {
++    Painter p{ output, width, height, format };
++    float s = (float) scale;
++    auto pressed = [&](PDButtons b) { return (cranked.currentInputs & (int32) b) != 0; };
++    auto button = [&](float x, float y, float r, bool down) {
++        if (down) p.ring(x * s, y * s, (r + 3) * s, 3 * s, BUTTON_RING);
++        p.circle(x * s, y * s, r * s, down ? BUTTON_PRESSED : BUTTON);
++    };
++    // the d-pad: a cross, with the pressed arms lit
++    p.roundRect((DPAD_X - DPAD_ARM) * s, (DPAD_Y - DPAD_THICK / 2) * s, 2 * DPAD_ARM * s, DPAD_THICK * s, 5 * s, BUTTON);
++    p.roundRect((DPAD_X - DPAD_THICK / 2) * s, (DPAD_Y - DPAD_ARM) * s, DPAD_THICK * s, 2 * DPAD_ARM * s, 5 * s, BUTTON);
++    float arm = DPAD_ARM - DPAD_THICK / 2, half = DPAD_THICK / 2 - 4;
++    if (pressed(PDButtons::Left)) p.roundRect((DPAD_X - DPAD_ARM + 4) * s, (DPAD_Y - half) * s, (arm - 4) * s, 2 * half * s, 3 * s, BUTTON_PRESSED);
++    if (pressed(PDButtons::Right)) p.roundRect((DPAD_X + DPAD_THICK / 2) * s, (DPAD_Y - half) * s, (arm - 4) * s, 2 * half * s, 3 * s, BUTTON_PRESSED);
++    if (pressed(PDButtons::Up)) p.roundRect((DPAD_X - half) * s, (DPAD_Y - DPAD_ARM + 4) * s, 2 * half * s, (arm - 4) * s, 3 * s, BUTTON_PRESSED);
++    if (pressed(PDButtons::Down)) p.roundRect((DPAD_X - half) * s, (DPAD_Y + DPAD_THICK / 2) * s, 2 * half * s, (arm - 4) * s, 3 * s, BUTTON_PRESSED);
++    button(B_X, B_Y, AB_RADIUS, pressed(PDButtons::B));
++    button(A_X, A_Y, AB_RADIUS, pressed(PDButtons::A));
++    button(MENU_X, MENU_Y, MENU_RADIUS, pressed(PDButtons::Menu));
++    // the crank: an arm from the hub at the crank's angle (0 up, clockwise), or folded away when docked
++    if (cranked.crankDocked) {
++        p.capsule((CRANK_X - 4) * s, (CRANK_Y + 30) * s, (CRANK_X - 4) * s, (CRANK_Y - 30) * s, 5 * s, BODY_EDGE);
++    } else {
++        float angle = cranked.crankAngle * std::numbers::pi_v<float> / 180, length = CRANK_RADIUS - 8;
++        float kx = CRANK_X + std::sin(angle) * length, ky = CRANK_Y - std::cos(angle) * length;
++        p.capsule(CRANK_X * s, CRANK_Y * s, kx * s, ky * s, 7 * s, CRANK_ARM);
++        p.circle(CRANK_X * s, CRANK_Y * s, 6 * s, BODY_EDGE);
++        p.circle(kx * s, ky * s, 9 * s, CRANK_KNOB);
++    }
++}
++
++void ScreenEffects::buildGlare(const ScreenEffectSettings &settings) {
++    glare.assign((size_t) DISPLAY_WIDTH * DISPLAY_HEIGHT, 0);
++    glareLight = settings.roomLight; glareTiltX = settings.tiltX; glareTiltY = settings.tiltY;
++    if (settings.roomLight <= 0) return;
++    // a soft spot from a lamp up and to the left, and a faint diagonal band, both moved by the tilt
++    float cx = DISPLAY_WIDTH * (0.30f - 0.35f * std::clamp(settings.tiltX, -1.0f, 1.0f));
++    float cy = DISPLAY_HEIGHT * (0.22f - 0.35f * std::clamp(settings.tiltY, -1.0f, 1.0f));
++    float sigma = DISPLAY_WIDTH * 0.32f, band = (cx + cy) * 1.6f, bandWidth = DISPLAY_WIDTH * 0.08f;
++    for (int y = 0; y < DISPLAY_HEIGHT; y++)
++        for (int x = 0; x < DISPLAY_WIDTH; x++) {
++            float dx = x - cx, dy = y - cy;
++            float spot = std::exp(-(dx * dx + dy * dy) / (2 * sigma * sigma));
++            float d = (x + y * 1.3f - band) / bandWidth;
++            float sheen = 0.45f * std::exp(-d * d);
++            float edge = std::min(1.0f, y / (DISPLAY_HEIGHT * 0.06f)); // the bezel's lip shades the top rows
++            float g = settings.roomLight * (0.30f * spot + 0.12f * sheen) * edge;
++            glare[(size_t) y * DISPLAY_WIDTH + x] = (uint8_t) std::clamp((int) (g * 255 + 0.5f), 0, 255);
++        }
++}
++
++const uint32_t *ScreenEffects::render(Cranked &cranked, const ScreenEffectSettings &settings, int scale, Format format) {
++    scale = std::max(scale, 1);
++    auto &graphics = cranked.graphics;
++    constexpr int W = DISPLAY_WIDTH, H = DISPLAY_HEIGHT;
++
++    // which pixels are lit: those of the display buffer in its "on" (white) color, in the buffer's byte order
++    uint32 onColor = graphics.displayBufferOnColor;
++    if (!graphics.displayBufferNativeEndian) {
++        uint8_t bytes[4] = { (uint8_t) (onColor >> 24), (uint8_t) (onColor >> 16), (uint8_t) (onColor >> 8), (uint8_t) onColor };
++        memcpy(&onColor, bytes, 4);
++    }
++    // a new game frame moves the current one to the previous (a front end may show a frame more than once)
++    int64_t stamp = cranked.lastFrameTime.time_since_epoch().count();
++    current.resize((size_t) W * H);
++    if (stamp != lastFrameStamp) {
++        if (lastFrameStamp != -1 and !current.empty()) { previous = current; havePrevious = true; }
++        lastFrameStamp = stamp;
++    }
++    const uint32 *source = &graphics.displayBufferRGBA[0][0]; // (cranked's uint32: DJGPP's uint32_t is long)
++    for (size_t i = 0; i < (size_t) W * H; i++)
++        current[i] = source[i] == onColor ? 1 : 0;
++    bool blend = settings.blendFrames and havePrevious and previous.size() == current.size();
++
++    // the colors of the three levels (dark, the mix of a blended pixel, light), with the room's light lifting them
++    const auto &preset = SCREEN_COLOR_PRESETS[std::clamp(settings.colors, 0, SCREEN_COLOR_PRESET_COUNT - 1)];
++    Rgb light = unpackRgb(preset.light), dark = unpackRgb(preset.dark);
++    float lift = 1 + 0.06f * std::clamp(settings.roomLight, 0.0f, 1.0f);
++    Rgb levels[3];
++    for (int l = 0; l < 3; l++) {
++        float t = l / 2.0f;
++        levels[l] = { (dark.r + (light.r - dark.r) * t) * lift, (dark.g + (light.g - dark.g) * t) * lift, (dark.b + (light.b - dark.b) * t) * lift };
++    }
++    if (glareLight != settings.roomLight or glareTiltX != settings.tiltX or glareTiltY != settings.tiltY or glare.empty())
++        buildGlare(settings);
++
++    // the output: the device's background, or just the screen
++    outputSize(scale, settings.deviceFrame, width, height);
++    if (settings.deviceFrame) {
++        if (frameScale != scale or frameFormat != format or frameBackground.empty()) { buildFrame(scale, format); outputHoldsFrame = false; }
++        // only the controls change outside the screen, and only when they move: their areas are restored before
++        // they are drawn again
++        controlsChanged = !outputHoldsFrame or cranked.currentInputs != drawnInputs or cranked.crankAngle != drawnAngle
++                          or cranked.crankDocked != drawnDocked;
++        drawnInputs = cranked.currentInputs; drawnAngle = cranked.crankAngle; drawnDocked = cranked.crankDocked;
++        if (outputHoldsFrame and !controlsChanged) {}
++        else if (outputHoldsFrame)
++            for (auto [x, y, r] : CONTROL_AREAS) {
++                int x0 = std::max(0, (int) ((x - r) * scale)), x1 = std::min(width, (int) ((x + r) * scale) + 1);
++                int y0 = std::max(0, (int) ((y - r) * scale)), y1 = std::min(height, (int) ((y + r) * scale) + 1);
++                for (int row = y0; row < y1; row++)
++                    std::copy(&frameBackground[(size_t) row * width + x0], &frameBackground[(size_t) row * width + x1], &output[(size_t) row * width + x0]);
++            }
++        else
++            output = frameBackground;
++        outputHoldsFrame = true;
++        screenX = SCREEN_LEFT * scale; screenY = SCREEN_TOP * scale;
++    } else {
++        output.resize((size_t) width * height);
++        outputHoldsFrame = false;
++        screenX = screenY = 0;
++    }
++
++    // the screen. At 2x and up, the grid takes the last row and column of each pixel's block toward the reflector's
++    // color (lighter in dark areas, darker in light ones), and a darker pixel up and to the left shades the first ones.
++    bool grid = settings.pixelGrid and scale >= 2, shadow = settings.pixelShadow and scale >= 2;
++    bool scan = settings.scanlines and scale >= 2;
++    float gridStrength = scale >= 3 ? 0.45f : 0.28f;
++    Rgb gap = { light.r * 0.86f * lift, light.g * 0.86f * lift, light.b * 0.86f * lift };
++    int shadowOffset = std::max(1, scale / 2);
++    auto levelAt = [&](int x, int y) -> int {
++        if (x < 0 or y < 0) return 2; // nothing casts a shadow from outside
++        size_t i = (size_t) y * W + x;
++        return blend ? current[i] + previous[i] : current[i] * 2;
++    };
++    // the colors of a pixel and its grid lines, for each level and amount of the room's light (none without it)
++    bool lit = settings.roomLight > 0;
++    int glareLevels = lit ? 256 : 1;
++    for (int l = 0; l < 3; l++)
++        for (int k = 0; k < glareLevels; k++) {
++            float g = k / 255.0f;
++            Rgb c = { levels[l].r + (255 - levels[l].r) * g, levels[l].g + (255 - levels[l].g) * g, levels[l].b + (255 - levels[l].b) * g };
++            Rgb e = { c.r + (gap.r - c.r) * gridStrength, c.g + (gap.g - c.g) * gridStrength, c.b + (gap.b - c.b) * gridStrength };
++            bodyColors[l][k] = pack((int) (c.r + 0.5f), (int) (c.g + 0.5f), (int) (c.b + 0.5f), 255, format);
++            edgeColors[l][k] = grid ? pack((int) (e.r + 0.5f), (int) (e.g + 0.5f), (int) (e.b + 0.5f), 255, format) : bodyColors[l][k];
++        }
++    uint32_t plainBody[3] = { bodyColors[0][0], bodyColors[1][0], bodyColors[2][0] };
++    // with scanlines, the same for each kind of output pixel: in the scanline or not, on a grid line or not, and its
++    // column's color (an aperture grille: each output column leans to red, green or blue)
++    if (scan)
++        for (int l = 0; l < 3; l++)
++            for (int k = 0; k < glareLevels; k++)
++                for (int dim = 0; dim < 2; dim++)
++                    for (int edge = 0; edge < 2; edge++)
++                        for (int phase = 0; phase < 3; phase++) {
++                            float g = k / 255.0f;
++                            Rgb p = { levels[l].r + (255 - levels[l].r) * g, levels[l].g + (255 - levels[l].g) * g, levels[l].b + (255 - levels[l].b) * g };
++                            if (edge and grid) p = { p.r + (gap.r - p.r) * gridStrength, p.g + (gap.g - p.g) * gridStrength, p.b + (gap.b - p.b) * gridStrength };
++                            float m = dim ? 0.55f : 1.0f;
++                            p = { p.r * m * (phase == 0 ? 1.0f : 0.82f), p.g * m * (phase == 1 ? 1.0f : 0.82f), p.b * m * (phase == 2 ? 1.0f : 0.82f) };
++                            scanColors[l][k][dim][edge][phase] = pack((int) (p.r + 0.5f), (int) (p.g + 0.5f), (int) (p.b + 0.5f), 255, format);
++                        }
++    if (!lit and !shadow and !scan and scale == 1) { // the plain screen
++        for (int sy = 0; sy < H; sy++) {
++            uint32_t *row = &output[(size_t) (screenY + sy) * width + screenX];
++            const uint8_t *cur = &current[(size_t) sy * W], *prev = blend ? &previous[(size_t) sy * W] : cur;
++            for (int sx = 0; sx < W; sx++)
++                row[sx] = plainBody[cur[sx] + prev[sx]];
++        }
++        if (settings.deviceFrame and controlsChanged)
++            drawControls(cranked, scale, format);
++        return output.data();
++    }
++    for (int sy = 0; sy < H; sy++) {
++        for (int sx = 0; sx < W; sx++) {
++            int level = levelAt(sx, sy);
++            int left = shadow ? levelAt(sx - 1, sy) : 2, up = shadow ? levelAt(sx, sy - 1) : 2, diagonal = shadow ? levelAt(sx - 1, sy - 1) : 2;
++            bool shaded = shadow and (left < level or up < level or diagonal < level);
++            if (!shaded and scan) {
++                int k = lit ? glare[(size_t) sy * W + sx] : 0;
++                for (int ly = 0; ly < scale; ly++) {
++                    uint32_t *row = &output[(size_t) (screenY + sy * scale + ly) * width + screenX + sx * scale];
++                    int dim = ly == scale - 1, column = (screenX + sx * scale) % 3;
++                    for (int lx = 0; lx < scale; lx++, column = column == 2 ? 0 : column + 1)
++                        row[lx] = scanColors[level][k][dim][lx == scale - 1 or ly == scale - 1][column];
++                }
++                continue;
++            }
++            if (!shaded and !scan) {
++                int k = lit ? glare[(size_t) sy * W + sx] : 0;
++                uint32_t body = bodyColors[level][k], edge = edgeColors[level][k];
++                for (int ly = 0; ly < scale; ly++) {
++                    uint32_t *row = &output[(size_t) (screenY + sy * scale + ly) * width + screenX + sx * scale];
++                    if (ly == scale - 1) { std::fill(row, row + scale, edge); continue; }
++                    std::fill(row, row + scale - 1, body);
++                    row[scale - 1] = edge;
++                }
++                continue;
++            }
++            Rgb c = levels[level];
++            float g = glare[(size_t) sy * W + sx] / 255.0f;
++            c = { c.r + (255 - c.r) * g, c.g + (255 - c.g) * g, c.b + (255 - c.b) * g };
++            Rgb gapColor = { c.r + (gap.r - c.r) * gridStrength, c.g + (gap.g - c.g) * gridStrength, c.b + (gap.b - c.b) * gridStrength };
++            if (!shaded and !scan) { // the common case: one or two colors per block
++                uint32_t body = pack((int) (c.r + 0.5f), (int) (c.g + 0.5f), (int) (c.b + 0.5f), 255, format);
++                uint32_t edge = grid ? pack((int) (gapColor.r + 0.5f), (int) (gapColor.g + 0.5f), (int) (gapColor.b + 0.5f), 255, format) : body;
++                for (int ly = 0; ly < scale; ly++) {
++                    uint32_t *row = &output[(size_t) (screenY + sy * scale + ly) * width + screenX + sx * scale];
++                    if (ly == scale - 1) { std::fill(row, row + scale, edge); continue; }
++                    std::fill(row, row + scale - 1, body);
++                    row[scale - 1] = edge;
++                }
++                continue;
++            }
++            for (int ly = 0; ly < scale; ly++) {
++                uint32_t *row = &output[(size_t) (screenY + sy * scale + ly) * width + screenX + sx * scale];
++                bool scanRow = scan and ly == scale - 1;
++                for (int lx = 0; lx < scale; lx++) {
++                    Rgb p = grid and (lx == scale - 1 or ly == scale - 1) ? gapColor : c;
++                    if (shadow) {
++                        // the pixel whose shadow lands here: offset down and to the right by shadowOffset
++                        int caster = lx < shadowOffset ? (ly < shadowOffset ? diagonal : left) : (ly < shadowOffset ? up : 2);
++                        if (caster < level) {
++                            float k = 1 - 0.07f * (float) (level - caster);
++                            p = { p.r * k, p.g * k, p.b * k };
++                        }
++                    }
++                    if (scan) {
++                        float k = scanRow ? 0.55f : 1.0f;
++                        // an aperture grille: each output column leans to red, green or blue
++                        int phase = (screenX + sx * scale + lx) % 3;
++                        p = { p.r * k * (phase == 0 ? 1.0f : 0.82f), p.g * k * (phase == 1 ? 1.0f : 0.82f), p.b * k * (phase == 2 ? 1.0f : 0.82f) };
++                    }
++                    row[lx] = pack((int) (p.r + 0.5f), (int) (p.g + 0.5f), (int) (p.b + 0.5f), 255, format);
++                }
++            }
++        }
++    }
++    if (settings.deviceFrame and controlsChanged)
++        drawControls(cranked, scale, format);
++    return output.data();
++}
+diff --git a/core/ScreenEffects.hpp b/core/ScreenEffects.hpp
+new file mode 100644
+index 0000000..8117b7f
+--- /dev/null
++++ b/core/ScreenEffects.hpp
+@@ -0,0 +1,73 @@
++#pragma once
++
++// Optional looks for the screen, for the front ends: color presets, blending of consecutive frames (games that
++// alternate pixels to make grey), the pixel grid and shadow of the Playdate's reflective LCD, light from the room,
++// CRT scanlines (a novelty; the Playdate never had a CRT), and a drawn device with buttons that light up and a crank
++// that turns. Everything is drawn on the CPU: the screen is 400x240 at one bit a pixel, so even at 3x it is cheap.
++
++#include <cstdint>
++#include <vector>
++
++namespace cranked {
++
++    class Cranked;
++
++    struct ScreenColors {
++        const char *name;
++        uint32_t light, dark; // 0xRRGGBB, of a clear (white) and a set (black) pixel
++    };
++
++    extern const ScreenColors SCREEN_COLOR_PRESETS[];
++    extern const int SCREEN_COLOR_PRESET_COUNT;
++
++    struct ScreenEffectSettings {
++        int colors = 0;            // an index into SCREEN_COLOR_PRESETS
++        bool blendFrames = false;  // each frame mixed with the one before
++        bool pixelGrid = false;    // gaps between pixels (2x and up)
++        bool pixelShadow = false;  // dark pixels cast a faint shadow on the reflector behind (2x and up)
++        float roomLight = 0;       // 0 to 1: a lamp's sheen across the screen
++        bool scanlines = false;    // CRT novelty (2x and up)
++        bool deviceFrame = false;  // the screen inside a drawn Playdate, with its buttons and crank
++        float tiltX = 0, tiltY = 0; // -1 to 1: moves the sheen (a phone's tilt, or the emulated accelerometer)
++
++        bool operator==(const ScreenEffectSettings &) const = default;
++    };
++
++    class ScreenEffects {
++    public:
++        enum class Format {
++            RGBA, // bytes R, G, B, A in memory (SDL's RGBA32, a canvas's ImageData); outside the device clear
++            XRGB, // native 32-bit 0x00RRGGBB (libretro's XRGB8888)
++        };
++
++        // Draws the current display (Graphics::displayBufferRGBA) at an integer scale of 1 or more. The result stays
++        // valid until the next call.
++        const uint32_t *render(Cranked &cranked, const ScreenEffectSettings &settings, int scale, Format format);
++
++        // Forgets the previous frame (a new game)
++        void reset() { havePrevious = false; }
++
++        // Of the last render: its size, and where the screen is inside it
++        int width = 0, height = 0, screenX = 0, screenY = 0;
++
++        // The output size for a scale, with or without the device (the device adds this much around the screen)
++        static void outputSize(int scale, bool deviceFrame, int &width, int &height);
++
++    private:
++        void buildFrame(int scale, Format format);
++        void drawControls(Cranked &cranked, int scale, Format format);
++        void buildGlare(const ScreenEffectSettings &settings);
++
++        std::vector<uint32_t> output, frameBackground;
++        std::vector<uint8_t> current, previous; // 1 for a clear (light) pixel, 0 for a set one
++        std::vector<uint8_t> glare; // per screen pixel, how far toward white (0 to 255)
++        uint32_t bodyColors[3][256]{}, edgeColors[3][256]{}; // by level and glare
++        uint32_t scanColors[3][256][2][2][3]{}; // with scanlines: by level, glare, scanline, grid line and column
++        bool havePrevious = false, outputHoldsFrame = false; // the output still has the device drawn around the screen
++        int64_t lastFrameStamp = -1;
++        int32_t drawnInputs = 0; float drawnAngle = 0; bool drawnDocked = false, controlsChanged = true; // the controls as drawn
++        int frameScale = 0; Format frameFormat = Format::RGBA;
++        float glareLight = -1, glareTiltX = 0, glareTiltY = 0;
++    };
++
++}
 diff --git a/core/UnicornStub.cpp b/core/UnicornStub.cpp
 new file mode 100644
 index 0000000..05728f0

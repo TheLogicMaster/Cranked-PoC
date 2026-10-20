@@ -79,13 +79,16 @@ index 0000000..59673bb
 +Module['preRun'].push(function () { if (typeof process !== 'undefined') Object.assign(ENV, process.env); });
 diff --git a/runner/runner.cpp b/runner/runner.cpp
 new file mode 100644
-index 0000000..974290a
+index 0000000..a6cb37d
 --- /dev/null
 +++ b/runner/runner.cpp
-@@ -0,0 +1,120 @@
+@@ -0,0 +1,175 @@
 +#include <map>
 +// Headless test runner: load a .pdx and run it until it stops or a time budget ends.
 +#include "Cranked.hpp"
++#include "ScreenEffects.hpp"
++#include <cstring>
++#include <string>
 +#include <chrono>
 +#include <cstdio>
 +#include <cstdlib>
@@ -96,6 +99,31 @@ index 0000000..974290a
 +using namespace cranked;
 +static long long frameCount = 0; static double updateNanos = 0;
 +static unsigned long long insnFrames = 0, insnTotal = 0, insnMax = 0; // CRANKED_COUNT_INSNS
++
++// RUNNER_EFFECTS_OUT=<file.ppm>: the last frame through the screen effects, with RUNNER_EFFECTS a comma-separated
++// list of scale=N, colors=N, blend, grid, shadow, light=F, scan, frame, tilt=X:Y
++static ScreenEffects effects;
++static ScreenEffectSettings effectSettings;
++static int effectScale = 2;
++static void parseEffects(const char *spec) {
++    std::string all = spec ? spec : "";
++    size_t start = 0;
++    while (start <= all.size()) {
++        size_t end = all.find(',', start);
++        std::string item = all.substr(start, end == std::string::npos ? std::string::npos : end - start);
++        if (item.rfind("scale=", 0) == 0) effectScale = std::atoi(item.c_str() + 6);
++        else if (item.rfind("colors=", 0) == 0) effectSettings.colors = std::atoi(item.c_str() + 7);
++        else if (item.rfind("light=", 0) == 0) effectSettings.roomLight = (float) std::atof(item.c_str() + 6);
++        else if (item.rfind("tilt=", 0) == 0) std::sscanf(item.c_str() + 5, "%f:%f", &effectSettings.tiltX, &effectSettings.tiltY);
++        else if (item == "blend") effectSettings.blendFrames = true;
++        else if (item == "grid") effectSettings.pixelGrid = true;
++        else if (item == "shadow") effectSettings.pixelShadow = true;
++        else if (item == "scan") effectSettings.scanlines = true;
++        else if (item == "frame") effectSettings.deviceFrame = true;
++        if (end == std::string::npos) break;
++        start = end + 1;
++    }
++}
 +
 +int main(int argc, char **argv) {
 +    if (argc < 2) { std::fprintf(stderr, "usage: runner <game.pdx> [seconds]\n"); return 2; }
@@ -152,6 +180,12 @@ index 0000000..974290a
 +                    static uint64_t lastCount = 0; uint64_t n = c->nativeEngine.insnCount - lastCount; lastCount += n;
 +                    if (frameCount > 30) { insnFrames++; insnTotal += n; insnMax = std::max(insnMax, (unsigned long long) n); } }
 +            }
++            static const char *effectsOut = getenv("RUNNER_EFFECTS_OUT");
++            if (effectsOut) {
++                static bool parsed = (parseEffects(getenv("RUNNER_EFFECTS")), true);
++                (void) parsed;
++                effects.render(*c, effectSettings, effectScale, ScreenEffects::Format::RGBA);
++            }
 +            static const bool heapDebug = getenv("CRANKED_HEAP_DEBUG") != nullptr; // read once (getenv per frame is costly)
 +            if (heapDebug) { static int lastReport = -1000; if (now - lastReport >= 500) { lastReport = now; std::fprintf(stderr, "heap used at %d ms: %zu KB\n", now, c->heap.usedBytes / 1024);
 +                std::map<int, int> counts; for (auto r : c->nativeEngine.liveResources()) counts[(int) r->type]++;
@@ -190,6 +224,27 @@ index 0000000..974290a
 +        if (FILE *f = std::fopen(path, "wb")) {
 +            std::fprintf(f, "P5 400 240 255\n");
 +            for (auto &row : c->graphics.displayBufferRGBA) for (auto px : row) std::fputc((int) (px & 0xFF), f);
++            std::fclose(f);
++        }
++    }
++    if (auto path = std::getenv("RUNNER_EFFECTS_OUT"); path and effects.width) { // RGBA output as a PPM over grey
++        if (FILE *f = std::fopen(path, "wb")) {
++            effects.render(*c, effectSettings, effectScale, ScreenEffects::Format::RGBA);
++            auto t0 = std::chrono::steady_clock::now();
++            for (int k = 0; k < 20; k++) effects.render(*c, effectSettings, effectScale, ScreenEffects::Format::RGBA);
++            auto *pixels = effects.render(*c, effectSettings, effectScale, ScreenEffects::Format::RGBA);
++            double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() / 21;
++            // a fresh renderer draws the same (the kept output only redraws parts of the device; not with blending)
++            ScreenEffects fresh;
++            auto *again = fresh.render(*c, effectSettings, effectScale, ScreenEffects::Format::RGBA);
++            long differ = 0;
++            for (int i = 0; i < effects.width * effects.height; i++) differ += again[i] != pixels[i];
++            std::fprintf(stderr, "effects: %dx%d, %.2f ms a frame, %ld pixels differ from a fresh render\n", effects.width, effects.height, ms, differ);
++            std::fprintf(f, "P6 %d %d 255\n", effects.width, effects.height);
++            for (int i = 0; i < effects.width * effects.height; i++) {
++                uint8_t b[4]; std::memcpy(b, &pixels[i], 4);
++                for (int k = 0; k < 3; k++) std::fputc((b[k] * b[3] + 0x60 * (255 - b[3])) / 255, f);
++            }
 +            std::fclose(f);
 +        }
 +    }

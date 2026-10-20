@@ -45,10 +45,16 @@ index 31cc9ce..f6e4e0d 100644
      )
  endif ()
 diff --git a/desktop/main.cpp b/desktop/main.cpp
-index 623038a..1db80e8 100644
+index 623038a..d694181 100644
 --- a/desktop/main.cpp
 +++ b/desktop/main.cpp
-@@ -11,6 +11,8 @@
+@@ -1,4 +1,5 @@
+ #include "Cranked.hpp"
++#include "ScreenEffects.hpp"
+ 
+ #include "imgui.h"
+ #include "imgui_impl_sdl2.h"
+@@ -11,6 +12,8 @@
  
  #include <SDL.h>
  
@@ -57,16 +63,17 @@ index 623038a..1db80e8 100644
  #include "magic_enum/magic_enum_all.hpp"
  
  #if !SDL_VERSION_ATLEAST(2,0,17)
-@@ -31,6 +33,8 @@ struct Userdata {
+@@ -31,6 +34,9 @@ struct Userdata {
      map<string, setting_type> settings; // Only updated while saving/loading
      float scale = 1;
      magic_enum::containers::array<Windows, bool> windowStates{};
 +    bool playerView = true; // the game fills the window (the debug windows stay available from View)
 +    vector<string> recentGames; // newest first
++    ScreenEffectSettings screen; // the screen's look (the Screen menu)
  
      template<typename T>
      bool tryGetSetting(const string &name, T &out) {
-@@ -42,25 +46,155 @@ struct Userdata {
+@@ -42,25 +48,155 @@ struct Userdata {
      }
  };
  
@@ -229,7 +236,7 @@ index 623038a..1db80e8 100644
  #ifdef SDL_HINT_IME_SHOW_UI
      SDL_SetHint(SDL_HINT_IME_SHOW_UI, "1");
  #endif
-@@ -79,7 +213,8 @@ int main(int argc, const char *args[]) {
+@@ -79,7 +215,8 @@ int main(int argc, const char *args[]) {
  
      auto windowFlags = (SDL_WindowFlags) (SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
      // Todo: If window starts small, it squishes saved window positions
@@ -239,7 +246,7 @@ index 623038a..1db80e8 100644
      if (!window)
          throw CrankedError("Failed to create SDL window: {}", SDL_GetError());
      SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_PRESENTVSYNC | SDL_RENDERER_ACCELERATED);
-@@ -89,7 +224,9 @@ int main(int argc, const char *args[]) {
+@@ -89,7 +226,9 @@ int main(int argc, const char *args[]) {
      IMGUI_CHECKVERSION();
      auto imguiContext = ImGui::CreateContext();
      ImGuiIO& io = ImGui::GetIO();
@@ -250,11 +257,19 @@ index 623038a..1db80e8 100644
  
      ImGui::StyleColorsLight();
  
-@@ -170,6 +307,13 @@ int main(int argc, const char *args[]) {
+@@ -170,6 +309,21 @@ int main(int argc, const char *args[]) {
                  userdata->tryGetSetting("ShowWindow" + string(magic_enum::enum_name(value)), shown);
                  userdata->windowStates[value] = shown;
              }
 +            userdata->tryGetSetting("PlayerView", userdata->playerView);
++            auto &screen = userdata->screen;
++            userdata->tryGetSetting("ScreenColors", screen.colors);
++            userdata->tryGetSetting("ScreenBlendFrames", screen.blendFrames);
++            userdata->tryGetSetting("ScreenPixelGrid", screen.pixelGrid);
++            userdata->tryGetSetting("ScreenPixelShadow", screen.pixelShadow);
++            userdata->tryGetSetting("ScreenRoomLight", screen.roomLight);
++            userdata->tryGetSetting("ScreenScanlines", screen.scanlines);
++            userdata->tryGetSetting("ScreenDeviceFrame", screen.deviceFrame);
 +            userdata->recentGames.clear();
 +            for (int i = 0; i < MAX_RECENT; i++) {
 +                string path;
@@ -264,17 +279,62 @@ index 623038a..1db80e8 100644
          };
          settingsHandler.WriteAllFn = [](ImGuiContext *ctx, ImGuiSettingsHandler *handler, ImGuiTextBuffer *buf) {
              auto userdata = (Userdata *)handler->UserData;
-@@ -185,6 +329,9 @@ int main(int argc, const char *args[]) {
+@@ -185,6 +339,17 @@ int main(int argc, const char *args[]) {
                  auto value = magic_enum::enum_value<Windows>(i);
                  userdata->settings["ShowWindow" + string(magic_enum::enum_name(value))] = userdata->windowStates[value];
              }
 +            userdata->settings["PlayerView"] = userdata->playerView;
++            auto &screen = userdata->screen;
++            userdata->settings["ScreenColors"] = screen.colors;
++            userdata->settings["ScreenBlendFrames"] = screen.blendFrames;
++            userdata->settings["ScreenPixelGrid"] = screen.pixelGrid;
++            userdata->settings["ScreenPixelShadow"] = screen.pixelShadow;
++            userdata->settings["ScreenRoomLight"] = screen.roomLight;
++            userdata->settings["ScreenScanlines"] = screen.scanlines;
++            userdata->settings["ScreenDeviceFrame"] = screen.deviceFrame;
 +            for (int i = 0; i < MAX_RECENT; i++)
 +                userdata->settings["Recent" + to_string(i)] = i < (int) userdata->recentGames.size() ? userdata->recentGames[i] : string();
  
              buf->append("[Cranked][Settings]\n");
              for (const auto &entry : userdata->settings) {
-@@ -221,9 +368,32 @@ int main(int argc, const char *args[]) {
+@@ -203,9 +368,33 @@ int main(int argc, const char *args[]) {
+         imguiContext->SettingsHandlers.push_back(settingsHandler);
+     }
+ 
+-    SDL_Texture* displayTexture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STREAMING, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+-    if (!displayTexture)
+-        throw CrankedError("Failed to create SDL display texture: ", SDL_GetError());
++    // the screen as drawn by ScreenEffects, in a texture remade when its size changes
++    ScreenEffects screenEffects;
++    SDL_Texture* displayTexture = nullptr;
++    int textureWidth = 0, textureHeight = 0;
++    auto updateDisplayTexture = [&](int renderScale, bool smooth) {
++        auto &screen = userdata.screen;
++        screen.tiltX = cranked.accelerometerX; // the emulated accelerometer's tilt moves the room's light
++        screen.tiltY = cranked.accelerometerZ;
++        auto pixels = screenEffects.render(cranked, screen, renderScale, ScreenEffects::Format::RGBA);
++        if (!displayTexture or textureWidth != screenEffects.width or textureHeight != screenEffects.height) {
++            if (displayTexture) SDL_DestroyTexture(displayTexture);
++            textureWidth = screenEffects.width; textureHeight = screenEffects.height;
++            displayTexture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STREAMING, textureWidth, textureHeight);
++            if (!displayTexture)
++                throw CrankedError("Failed to create SDL display texture: {}", SDL_GetError());
++            SDL_SetTextureBlendMode(displayTexture, SDL_BLENDMODE_BLEND); // the drawn device's outside is clear
++        }
++        SDL_SetTextureScaleMode(displayTexture, smooth ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
++        SDL_UpdateTexture(displayTexture, nullptr, pixels, 4 * textureWidth);
++    };
++    // the scale to draw at for a shown size of factor times the screen: the effects that work on parts of a pixel
++    // need the size it is shown at; otherwise the screen is drawn at 1x and stretched
++    auto renderScaleFor = [&](float factor) {
++        auto &screen = userdata.screen;
++        bool fine = screen.pixelGrid or screen.pixelShadow or screen.scanlines or screen.deviceFrame;
++        return fine ? std::clamp((int) ceilf(factor - 0.01f), 1, 6) : 1;
++    };
+ 
+     auto getWindowOpen = [&](Windows w) -> bool & { return userdata.windowStates[w]; };
+ 
+@@ -221,9 +410,32 @@ int main(int argc, const char *args[]) {
      int newScale = 1;
      bool firstFrame = true;
      bool requestedStart = false;
@@ -307,7 +367,7 @@ index 623038a..1db80e8 100644
      // Todo: Extract the following disaster to separate functions
      auto callback = [&](Cranked &cranked){
          if (audioDevice) {
-@@ -240,13 +410,69 @@ int main(int argc, const char *args[]) {
+@@ -240,13 +452,69 @@ int main(int argc, const char *args[]) {
                  exited = true;
                  cranked.terminate();
              }
@@ -381,7 +441,7 @@ index 623038a..1db80e8 100644
          buttonInputs = 0;
  
          io.FontGlobalScale = scale;
-@@ -258,10 +484,28 @@ int main(int argc, const char *args[]) {
+@@ -258,10 +526,28 @@ int main(int argc, const char *args[]) {
          if (firstFrame) {
              newScale = (int)scale;
              firstFrame = false;
@@ -411,7 +471,7 @@ index 623038a..1db80e8 100644
                  // Todo: Clean this up (Different menu? Termination should not be necessary) (Also just doesn't work correctly at preset)
                  if (ImGui::MenuItem(cranked.state == Cranked::State::Stopped ? "Start" : cranked.state == Cranked::State::Stopping ? "Terminate" : "Stop")) {
                      switch (cranked.state) {
-@@ -281,6 +525,11 @@ int main(int argc, const char *args[]) {
+@@ -281,6 +567,11 @@ int main(int argc, const char *args[]) {
                  ImGui::EndMenu();
              }
              if (ImGui::BeginMenu("View")) {
@@ -423,10 +483,33 @@ index 623038a..1db80e8 100644
                  if (ImGui::SliderInt("Scale", &newScale, 1, 6, "%dx", ImGuiSliderFlags_NoInput))
                      wasScaling = true;
                  ImGui::MenuItem("Show Debug", nullptr, &getWindowOpen(Windows::Debug));
-@@ -298,8 +547,29 @@ int main(int argc, const char *args[]) {
+@@ -298,8 +589,52 @@ int main(int argc, const char *args[]) {
                  scale = (float)newScale;
                  wasScaling = false;
              }
++            if (ImGui::BeginMenu("Screen")) { // the screen's look (ScreenEffects)
++                auto &screen = userdata.screen;
++                if (ImGui::BeginMenu("Colors")) {
++                    for (int i = 0; i < SCREEN_COLOR_PRESET_COUNT; i++)
++                        if (ImGui::MenuItem(SCREEN_COLOR_PRESETS[i].name, nullptr, screen.colors == i))
++                            screen.colors = i;
++                    ImGui::EndMenu();
++                }
++                ImGui::MenuItem("Blend frames", nullptr, &screen.blendFrames);
++                ImGui::SetItemTooltip("Mixes each frame with the one before, as the eye does with pixels a game flickers to make grey");
++                ImGui::MenuItem("Pixel grid", nullptr, &screen.pixelGrid);
++                ImGui::MenuItem("Pixel shadow", nullptr, &screen.pixelShadow);
++                ImGui::SetNextItemWidth(120 * scale);
++                ImGui::SliderFloat("Room light", &screen.roomLight, 0, 1, "%.2f");
++                ImGui::SetItemTooltip("A lamp's sheen on the screen; the accelerometer's tilt moves it");
++                ImGui::MenuItem("Scanlines (CRT)", nullptr, &screen.scanlines);
++                ImGui::Separator();
++                ImGui::MenuItem("Device frame", nullptr, &screen.deviceFrame);
++                ImGui::SetItemTooltip("The screen inside a drawn Playdate whose buttons light up and whose crank turns");
++                if (ImGui::MenuItem("Reset to defaults"))
++                    screen = ScreenEffectSettings{};
++                ImGui::EndMenu();
++            }
 +            if (ImGui::BeginMenu("Help")) {
 +                if (ImGui::MenuItem("About"))
 +                    aboutRequested = true;
@@ -453,20 +536,23 @@ index 623038a..1db80e8 100644
  
          // ImGui::ShowDemoWindow();
  
-@@ -307,15 +577,50 @@ int main(int argc, const char *args[]) {
+@@ -307,15 +642,55 @@ int main(int argc, const char *args[]) {
  
          // Todo: Performance/stats window (Heap usage, frame times, program size), or just throw them around
  
 -        {
-+        SDL_UpdateTexture(displayTexture, nullptr, cranked.graphics.displayBufferRGBA, 4 * DISPLAY_WIDTH);
++        int unitWidth, unitHeight; // the size of what is shown (the screen, or the drawn device) at 1x
++        ScreenEffects::outputSize(1, userdata.screen.deviceFrame, unitWidth, unitHeight);
 +        if (userdata.playerView) { // the screen fills the window below the menu bar, at whole multiples when it can
 +            auto viewport = ImGui::GetMainViewport();
 +            ImVec2 origin = viewport->WorkPos, size = viewport->WorkSize;
-+            float fit = min(size.x / DISPLAY_WIDTH, size.y / DISPLAY_HEIGHT);
++            float fit = min(size.x / unitWidth, size.y / unitHeight);
 +            float factor = fit >= 1 ? floorf(fit) : fit;
 +            if (fit - factor > 0.25f * factor) // much room left over: fill it instead
 +                factor = fit;
-+            ImVec2 shown{ DISPLAY_WIDTH * factor, DISPLAY_HEIGHT * factor };
++            int renderScale = renderScaleFor(factor);
++            updateDisplayTexture(renderScale, factor != (float) renderScale);
++            ImVec2 shown{ unitWidth * factor, unitHeight * factor };
 +            ImVec2 corner{ floorf(origin.x + (size.x - shown.x) / 2), floorf(origin.y + (size.y - shown.y) / 2) };
 +            auto drawList = ImGui::GetBackgroundDrawList();
 +            drawList->AddRectFilled(origin, ImVec2(origin.x + size.x, origin.y + size.y), ImGui::GetColorU32(bezelColor));
@@ -480,7 +566,10 @@ index 623038a..1db80e8 100644
              ImGui::PushStyleColor(ImGuiCol_WindowBg, bezelColor);
              ImGui::Begin("Display", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_AlwaysAutoResize);
 -            SDL_UpdateTexture(displayTexture, nullptr, cranked.graphics.displayBufferRGBA, 4 * DISPLAY_WIDTH);
-             ImGui::Image((ImTextureID) (intptr_t) displayTexture, ImVec2(DISPLAY_WIDTH * scale, DISPLAY_HEIGHT * scale));
+-            ImGui::Image((ImTextureID) (intptr_t) displayTexture, ImVec2(DISPLAY_WIDTH * scale, DISPLAY_HEIGHT * scale));
++            int renderScale = renderScaleFor(scale);
++            updateDisplayTexture(renderScale, scale != (float) renderScale);
++            ImGui::Image((ImTextureID) (intptr_t) displayTexture, ImVec2(unitWidth * scale, unitHeight * scale));
              ImGui::End();
              ImGui::PopStyleColor();
          }
@@ -506,7 +595,7 @@ index 623038a..1db80e8 100644
          if (getWindowOpen(Windows::Debug)) {
              ImGui::Begin("Debug", &getWindowOpen(Windows::Debug), ImGuiWindowFlags_None);
  
-@@ -575,26 +880,72 @@ int main(int argc, const char *args[]) {
+@@ -575,28 +950,75 @@ int main(int argc, const char *args[]) {
      };
      cranked.config.updateCallback = callback;
      cranked.config.debugPort = debugPort;
@@ -521,6 +610,7 @@ index 623038a..1db80e8 100644
 +        lastError.clear();
 +        try {
 +            cranked.load(path);
++            screenEffects.reset();
 +            cranked.crankDocked = true;
 +            auto name = cranked.rom->getName();
 +            SDL_SetWindowTitle(window, (name and *name) ? name : "Cranked");
@@ -583,8 +673,11 @@ index 623038a..1db80e8 100644
 +    for (auto controller : controllers)
 +        SDL_GameControllerClose(controller);
  
-     SDL_DestroyTexture(displayTexture);
+-    SDL_DestroyTexture(displayTexture);
++    if (displayTexture) SDL_DestroyTexture(displayTexture);
  
+     ImGui_ImplSDLRenderer2_Shutdown();
+     ImGui_ImplSDL2_Shutdown();
 diff --git a/dos/CMakeLists.txt b/dos/CMakeLists.txt
 new file mode 100644
 index 0000000..c4321e0
@@ -597,10 +690,10 @@ index 0000000..c4321e0
 +set_target_properties(cranked_dos PROPERTIES OUTPUT_NAME cranked)
 diff --git a/dos/main.cpp b/dos/main.cpp
 new file mode 100644
-index 0000000..9fb4c9e
+index 0000000..d4bf0fd
 --- /dev/null
 +++ b/dos/main.cpp
-@@ -0,0 +1,697 @@
+@@ -0,0 +1,740 @@
 +// DOS front end (DJGPP, 32-bit protected mode under a DPMI host). Needs a 386 or better with a VGA; a Sound Blaster
 +// 16 is used when the BLASTER variable names one, and a mouse driver when one is loaded.
 +//
@@ -609,15 +702,19 @@ index 0000000..9fb4c9e
 +//     -q          no sound
 +//     -t <secs>   stop after this much game time
 +//     -shot <file.bmp>  write the last frame as a BMP when the game ends (for scripted runs)
++//     -c <n>      the screen's colors: 0 Playdate, 1 bright room, 2 paper, 3 Game Boy, 4 amber, 5 high contrast
++//     -b          blend each frame with the one before (pixels a game flickers to make grey are shown grey)
 +//
 +// Keys: arrows (or the numeric keypad) for the d-pad; Z or A for B; X or S for A; Enter for the menu; comma and
 +// period turn the crank, C docks and undocks it, and moving the mouse left and right turns it too. P pauses,
-+// F5 restarts the game, F12 saves a screenshot (CRANKnnn.BMP), Esc quits.
++// F2 changes the colors, F3 turns blending on and off, F5 restarts the game, F12 saves a screenshot (CRANKnnn.BMP),
++// Esc quits.
 +//
 +// The game's clock is virtual and advances with uclock(), the PIT-based timer (the DOS clock's 55 ms ticks are too
 +// coarse for frame pacing), by at most 100 ms an update: a host too slow for the game slows it down rather than
 +// making it skip ahead.
 +#include "Cranked.hpp"
++#include "ScreenEffects.hpp"
 +
 +#include <dpmi.h>
 +#include <go32.h>
@@ -708,7 +805,7 @@ index 0000000..9fb4c9e
 +
 +enum Scan : int {
 +    ESC = 0x01, KEY_A = 0x1E, KEY_S = 0x1F, KEY_Z = 0x2C, KEY_X = 0x2D, KEY_C = 0x2E, KEY_P = 0x19, COMMA = 0x33,
-+    PERIOD = 0x34, ENTER = 0x1C, F5 = 0x3F, F12 = 0x58, UP = 0x48, LEFT = 0x4B, RIGHT = 0x4D, DOWN = 0x50,
++    PERIOD = 0x34, ENTER = 0x1C, F2 = 0x3C, F3 = 0x3D, F5 = 0x3F, F12 = 0x58, UP = 0x48, LEFT = 0x4B, RIGHT = 0x4D, DOWN = 0x50,
 +    EXT = 0x80,
 +};
 +
@@ -722,14 +819,16 @@ index 0000000..9fb4c9e
 +    return true;
 +}
 +
-+// ---- Display: a 16-color planar VGA mode, writing plane 0 only, so each byte is eight pixels of color 0 or 1 ----
++// ---- Display: a 16-color planar VGA mode with two planes in use: plane 0 has the frame, plane 1 the frame before
++// when blending (else the frame again), so a pixel's color is 0 (dark), 3 (light), or 1 or 2 (between) ----
 +
 +struct Display {
 +    int stride = 80, left = 15, top = 120; // bytes per row, the display's position in bytes and rows
 +    bool doubled = false;
 +    bool active = false;
-+    uint8_t previous[HEIGHT][ROW_BYTES];
-+    bool previousValid = false;
++    uint8_t shown[2][HEIGHT][ROW_BYTES]; // what each plane has
++    uint8_t lastFrame[HEIGHT][ROW_BYTES]; // the frame presented before, for blending
++    bool shownValid = false, lastValid = false;
 +    uint16_t doubleBits[256]; // each bit twice
 +
 +    bool setVesa800() {
@@ -777,7 +876,19 @@ index 0000000..9fb4c9e
 +        outportb(0x3C9, (rgba >> 10) & 0x3F);
 +    }
 +
-+    void open(bool allowDouble, uint32_t on, uint32_t off) {
++    // the colors of a preset: dark, light, and their mix for a blended pixel
++    static void setColors(int preset) {
++        const auto &colors = SCREEN_COLOR_PRESETS[std::clamp(preset, 0, SCREEN_COLOR_PRESET_COUNT - 1)];
++        uint32_t light = colors.light << 8, dark = colors.dark << 8, mid = 0;
++        for (int shift = 8; shift < 32; shift += 8)
++            mid |= (((light >> shift & 0xFF) + (dark >> shift & 0xFF)) / 2) << shift;
++        setColor(0, dark);
++        setColor(1, mid);
++        setColor(2, mid);
++        setColor(3, light);
++    }
++
++    void open(bool allowDouble, int preset) {
 +        if (!allowDouble or !setVesa800())
 +            setVga640();
 +        active = true;
@@ -788,15 +899,12 @@ index 0000000..9fb4c9e
 +                    bits |= 0xC000 >> (k * 2);
 +            doubleBits[v] = (uint16_t) (bits >> 8 | bits << 8); // the high byte first in memory
 +        }
-+        setColor(0, off);
-+        setColor(1, on);
++        setColors(preset);
 +        // the border (overscan) in the dark color too, as the area around the display
 +        inportb(0x3DA);
 +        outportb(0x3C0, 0x11 | 0x20);
 +        outportb(0x3C0, 0x00);
-+        outportb(0x3C4, 0x02); // sequencer map mask: plane 0
-+        outportb(0x3C5, 0x01);
-+        previousValid = false;
++        shownValid = lastValid = false;
 +    }
 +
 +    void close() {
@@ -821,24 +929,39 @@ index 0000000..9fb4c9e
 +        }
 +    }
 +
-+    void present(const Cranked &cranked) {
++    // a row into the planes in the mask (1, 2 or both) where it differs from what they have
++    void putRow(int mask, int y, const uint8_t *bits) {
++        bool same = shownValid;
++        for (int plane = 0; plane < 2; plane++)
++            if (mask >> plane & 1) same = same and memcmp(shown[plane][y], bits, ROW_BYTES) == 0;
++        if (same)
++            return;
++        for (int plane = 0; plane < 2; plane++)
++            if (mask >> plane & 1) memcpy(shown[plane][y], bits, ROW_BYTES);
++        outportb(0x3C4, 0x02); // sequencer map mask: these planes
++        outportb(0x3C5, (uint8_t) mask);
++        if (doubled) {
++            uint16_t wide[ROW_BYTES];
++            for (int b = 0; b < ROW_BYTES; b++)
++                wide[b] = doubleBits[bits[b]];
++            unsigned long address = 0xA0000 + (unsigned long) (top + y * 2) * stride + left;
++            dosmemput(wide, sizeof wide, address);
++            dosmemput(wide, sizeof wide, address + stride);
++        } else
++            dosmemput(bits, ROW_BYTES, 0xA0000 + (unsigned long) (top + y) * stride + left);
++    }
++
++    void present(const Cranked &cranked, bool blend) {
 +        uint8_t frame[HEIGHT][ROW_BYTES];
 +        pack(cranked, frame);
-+        for (int y = 0; y < HEIGHT; y++) {
-+            if (previousValid and memcmp(frame[y], previous[y], ROW_BYTES) == 0)
-+                continue;
-+            memcpy(previous[y], frame[y], ROW_BYTES);
-+            if (doubled) {
-+                uint16_t wide[ROW_BYTES];
-+                for (int b = 0; b < ROW_BYTES; b++)
-+                    wide[b] = doubleBits[frame[y][b]];
-+                unsigned long address = 0xA0000 + (unsigned long) (top + y * 2) * stride + left;
-+                dosmemput(wide, sizeof wide, address);
-+                dosmemput(wide, sizeof wide, address + stride);
++        for (int y = 0; y < HEIGHT; y++)
++            if (blend and lastValid) {
++                putRow(1, y, frame[y]);
++                putRow(2, y, lastFrame[y]);
 +            } else
-+                dosmemput(frame[y], ROW_BYTES, 0xA0000 + (unsigned long) (top + y) * stride + left);
-+        }
-+        previousValid = true;
++                putRow(3, y, frame[y]); // both planes in one write
++        memcpy(lastFrame, frame, sizeof frame);
++        shownValid = lastValid = true;
 +    }
 +};
 +
@@ -1121,14 +1244,15 @@ index 0000000..9fb4c9e
 +}
 +
 +int usage() {
-+    std::fputs("usage: cranked [-1] [-q] [-t <seconds>] [-shot <file.bmp>] <game.pdx | game.zip>\n", stderr);
++    std::fputs("usage: cranked [-1] [-q] [-c <colors 0-5>] [-b] [-t <seconds>] [-shot <file.bmp>] <game.pdx | game.zip>\n", stderr);
 +    return 2;
 +}
 +
 +}
 +
 +int main(int argc, char **argv) {
-+    bool allowDouble = true, quiet = false;
++    bool allowDouble = true, quiet = false, blend = false;
++    int colors = 0;
 +    double timeLimit = 0;
 +    const char *shotPath = nullptr, *gamePath = nullptr;
 +    for (int i = 1; i < argc; i++) {
@@ -1137,6 +1261,8 @@ index 0000000..9fb4c9e
 +        else if (arg == "-q") quiet = true;
 +        else if (arg == "-t" and i + 1 < argc) timeLimit = std::atof(argv[++i]);
 +        else if (arg == "-shot" and i + 1 < argc) shotPath = argv[++i];
++        else if (arg == "-c" and i + 1 < argc) colors = std::clamp(std::atoi(argv[++i]), 0, SCREEN_COLOR_PRESET_COUNT - 1);
++        else if (arg == "-b") blend = true;
 +        else if (arg.starts_with("-")) return usage();
 +        else gamePath = argv[i];
 +    }
@@ -1171,7 +1297,9 @@ index 0000000..9fb4c9e
 +            std::fprintf(logFile, "Could not load %s: %s\n", gamePath, e.what());
 +        return 1;
 +    }
-+    uint32_t on = cranked->graphics.displayBufferOnColor, off = cranked->graphics.displayBufferOffColor;
++    // the screen's colors, as 0xRRGGBBAA (for the screenshots)
++    auto presetOn = [&] { return SCREEN_COLOR_PRESETS[colors].light << 8 | 0xFF; };
++    auto presetOff = [&] { return SCREEN_COLOR_PRESETS[colors].dark << 8 | 0xFF; };
 +
 +    std::atexit(restore);
 +    for (int s : { SIGSEGV, SIGFPE, SIGILL, SIGABRT, SIGINT })
@@ -1183,7 +1311,7 @@ index 0000000..9fb4c9e
 +        return 1;
 +    }
 +    openMouse();
-+    display.open(allowDouble, on, off);
++    display.open(allowDouble, colors);
 +    if (const char *capture = getenv("CRANKED_DOSBOX_CAPTURE"))
 +        dosboxCapture = std::atoi(capture);
 +    if (dosboxCapture & 4)
@@ -1212,10 +1340,18 @@ index 0000000..9fb4c9e
 +            }
 +            if (pressed(KEY_C))
 +                cranked->crankDocked = !cranked->crankDocked;
++            if (pressed(F2)) {
++                colors = (colors + 1) % SCREEN_COLOR_PRESET_COUNT;
++                Display::setColors(colors);
++            }
++            if (pressed(F3)) {
++                blend = !blend;
++                display.present(*cranked, blend); // shown at once, even while paused
++            }
 +            if (pressed(F12)) {
 +                char name[16];
 +                std::snprintf(name, sizeof name, "CRANK%03d.BMP", screenshots++ % 1000);
-+                writeBmp(*cranked, name, on, off);
++                writeBmp(*cranked, name, presetOn(), presetOff());
 +            }
 +            float turn = (float) (mouseMotionX() * 0.75);
 +            if (held(COMMA)) turn -= (float) (elapsed * 360e-6);
@@ -1249,7 +1385,7 @@ index 0000000..9fb4c9e
 +            soundMicros += t2 - t1;
 +            if (cranked->lastFrameTime != lastFrame) {
 +                lastFrame = cranked->lastFrameTime;
-+                display.present(*cranked);
++                display.present(*cranked, blend);
 +                presentMicros += uclockMicros() - t2;
 +                frames++;
 +            } else
@@ -1260,7 +1396,7 @@ index 0000000..9fb4c9e
 +    } catch (...) {
 +        error = "unknown error";
 +    }
-+    if (shotPath and !writeBmp(*cranked, shotPath, on, off))
++    if (shotPath and !writeBmp(*cranked, shotPath, presetOn(), presetOff()))
 +        std::fprintf(stderr, "Could not write %s\n", shotPath);
 +    if (dosboxCapture & 1) { // the screen as it is, before the text mode returns
 +        dosboxTrigger(1);
@@ -1450,19 +1586,26 @@ index 7425778..5b48547 100644
  if (WIN32)
      set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /MP /Zc:__cplusplus")
 diff --git a/libretro/core.cpp b/libretro/core.cpp
-index 4a423c8..ba10fa8 100644
+index 4a423c8..8cde1e1 100644
 --- a/libretro/core.cpp
 +++ b/libretro/core.cpp
-@@ -6,6 +6,8 @@
+@@ -1,4 +1,5 @@
+ #include "Cranked.hpp"
++#include "ScreenEffects.hpp"
+ #include "libretro.h"
+ 
+ #include <cstdio>
+@@ -6,6 +7,9 @@
  #include <cstdlib>
  #include <cstdarg>
  #include <cstring>
 +#include <cmath>
++#include <string>
 +#include <vector>
  
  using namespace cranked;
  
-@@ -32,10 +34,69 @@ static void emulatorCallback(Cranked &context) {
+@@ -32,10 +36,114 @@ static void emulatorCallback(Cranked &context) {
  
  }
  
@@ -1470,6 +1613,51 @@ index 4a423c8..ba10fa8 100644
 +// leaving the core, which would take the frontend down with it. The last frame stays on screen.
 +static bool failed;
 +static constexpr int AUDIO_RATE = 44100, FRAME_RATE = 60;
++
++// The screen's look (ScreenEffects), from the core options: colors and frame blending at the screen's own size; the
++// LCD look, scanlines and the device frame at 2x or 3x (RetroArch's own shaders work on the plain screen too)
++static ScreenEffects screenEffects;
++static ScreenEffectSettings screenSettings;
++static int screenScale = 1;
++static const retro_variable OPTIONS[] = {
++    { "cranked_colors", "Screen colors; Playdate|Bright room|Paper|Game Boy|Amber|High contrast" },
++    { "cranked_blend", "Blend frames (flickered pixels as grey); disabled|enabled" },
++    { "cranked_lcd", "LCD look; off|pixel grid|pixel grid and shadow|scanlines (CRT)" },
++    { "cranked_light", "Room light on the screen; off|low|medium|high" },
++    { "cranked_device", "Device frame (buttons light up, the crank turns); disabled|enabled" },
++    { "cranked_scale", "Scale for the LCD look and the device frame; 2x|3x" },
++    { nullptr, nullptr },
++};
++
++static const char *option(const char *key) {
++    retro_variable variable{ key, nullptr };
++    return environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &variable) and variable.value ? variable.value : "";
++}
++
++static void readOptions() {
++    ScreenEffectSettings settings;
++    std::string colors = option("cranked_colors");
++    for (int i = 0; i < SCREEN_COLOR_PRESET_COUNT; i++)
++        if (colors == SCREEN_COLOR_PRESETS[i].name) settings.colors = i;
++    settings.blendFrames = std::string(option("cranked_blend")) == "enabled";
++    std::string lcd = option("cranked_lcd");
++    settings.pixelGrid = lcd == "pixel grid" or lcd == "pixel grid and shadow";
++    settings.pixelShadow = lcd == "pixel grid and shadow";
++    settings.scanlines = lcd == "scanlines (CRT)";
++    std::string light = option("cranked_light");
++    settings.roomLight = light == "low" ? 0.35f : light == "medium" ? 0.6f : light == "high" ? 0.9f : 0.0f;
++    settings.deviceFrame = std::string(option("cranked_device")) == "enabled";
++    bool fine = settings.pixelGrid or settings.pixelShadow or settings.scanlines or settings.deviceFrame;
++    screenScale = fine ? (std::string(option("cranked_scale")) == "3x" ? 3 : 2) : 1;
++    screenSettings = settings;
++}
++
++static retro_game_geometry screenGeometry() {
++    int width, height, maxWidth, maxHeight;
++    ScreenEffects::outputSize(screenScale, screenSettings.deviceFrame, width, height);
++    ScreenEffects::outputSize(3, true, maxWidth, maxHeight); // the largest: the device at 3x
++    return { (unsigned) width, (unsigned) height, (unsigned) maxWidth, (unsigned) maxHeight, (float) width / (float) height };
++}
 +
 +template<typename F>
 +static bool guarded(const char *what, F &&f) {
@@ -1532,7 +1720,7 @@ index 4a423c8..ba10fa8 100644
  }
  
  void retro_deinit() {
-@@ -45,15 +106,28 @@ void retro_deinit() {
+@@ -45,17 +153,37 @@ void retro_deinit() {
  }
  
  void retro_reset() {
@@ -1542,6 +1730,12 @@ index 4a423c8..ba10fa8 100644
  
  void retro_run() {
      input_poll_cb();
++    bool updated = false;
++    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) and updated) { // a changed option: maybe a new size
++        readOptions();
++        auto geometry = screenGeometry();
++        environ_cb(RETRO_ENVIRONMENT_SET_GEOMETRY, &geometry);
++    }
 +    if (!failed) {
 +        readInput();
 +        instance->advanceVirtualClock(1000000 / FRAME_RATE);
@@ -1551,6 +1745,8 @@ index 4a423c8..ba10fa8 100644
 -    audio_cb(0, 0);
 -
 -    instance->update();
+-
+-    video_cb(instance->graphics.displayBufferRGBA, DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_WIDTH * sizeof(uint32));
 +    // one frame of audio at 44.1 kHz (silence once the game has stopped)
 +    static double carry;
 +    carry += (double) AUDIO_RATE / FRAME_RATE;
@@ -1562,10 +1758,13 @@ index 4a423c8..ba10fa8 100644
 +        guarded("audio", [&] { instance->audio.sampleAudio(buffer.data(), samples); });
 +    if (audio_batch_cb)
 +        audio_batch_cb(buffer.data(), (size_t) samples);
- 
-     video_cb(instance->graphics.displayBufferRGBA, DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_WIDTH * sizeof(uint32));
++
++    auto pixels = screenEffects.render(*instance, screenSettings, screenScale, ScreenEffects::Format::XRGB);
++    video_cb(pixels, (unsigned) screenEffects.width, (unsigned) screenEffects.height, (size_t) screenEffects.width * sizeof(uint32));
  }
-@@ -65,14 +139,23 @@ bool retro_load_game(const retro_game_info *info) {
+ 
+ bool retro_load_game(const retro_game_info *info) {
+@@ -65,14 +193,25 @@ bool retro_load_game(const retro_game_info *info) {
          return false;
      }
  
@@ -1577,6 +1776,8 @@ index 4a423c8..ba10fa8 100644
 +        return false;
 +    failed = false;
 +    instance->crankDocked = true;
++    readOptions();
++    screenEffects.reset();
 +    // game data (saves, datastore) goes in the frontend's save directory, in a "Cranked" folder, rather
 +    // than "appData" in whatever the frontend's working directory is (which may not be writable)
 +    const char *saveDirectory = nullptr;
@@ -1594,7 +1795,7 @@ index 4a423c8..ba10fa8 100644
  }
  
  unsigned int retro_api_version(void) {
-@@ -89,11 +172,11 @@ void retro_get_system_info(struct retro_system_info *info) {
+@@ -89,26 +228,21 @@ void retro_get_system_info(struct retro_system_info *info) {
      info->library_version = "v1";
      info->need_fullpath = true;
      info->block_extract = true;
@@ -1606,17 +1807,26 @@ index 4a423c8..ba10fa8 100644
 -    info->timing = {.fps = 60.0, .sample_rate = 0.0};
 +    info->timing = {.fps = (double) FRAME_RATE, .sample_rate = (double) AUDIO_RATE}; // audio is produced every frame
  
-     info->geometry = {
-             .base_width = DISPLAY_WIDTH,
-@@ -107,7 +190,7 @@ void retro_get_system_av_info(struct retro_system_av_info *info) {
+-    info->geometry = {
+-            .base_width = DISPLAY_WIDTH,
+-            .base_height = DISPLAY_HEIGHT,
+-            .max_width = DISPLAY_WIDTH,
+-            .max_height = DISPLAY_HEIGHT,
+-            .aspect_ratio = (float) DISPLAY_WIDTH / DISPLAY_HEIGHT,
+-    };
++    info->geometry = screenGeometry(); // the screen, or the drawn device, at the options' scale
+ }
+ 
  void retro_set_environment(retro_environment_t cb) {
      environ_cb = cb;
  
 -    bool no_content = true;
 +    bool no_content = false; // a game is required (retro_load_game refuses no content)
      cb(RETRO_ENVIRONMENT_SET_SUPPORT_NO_GAME, &no_content);
++    cb(RETRO_ENVIRONMENT_SET_VARIABLES, (void *) OPTIONS);
  
      if (cb(RETRO_ENVIRONMENT_GET_LOG_INTERFACE, &logging))
+         log_cb = logging.log;
 diff --git a/web/CMakeLists.txt b/web/CMakeLists.txt
 new file mode 100644
 index 0000000..fded56d
@@ -1671,14 +1881,14 @@ index 0000000..976b965
 +registerProcessor("cranked-audio", CrankedAudio);
 diff --git a/web/engine.js b/web/engine.js
 new file mode 100644
-index 0000000..ca38e68
+index 0000000..c7fd856
 --- /dev/null
 +++ b/web/engine.js
-@@ -0,0 +1,127 @@
+@@ -0,0 +1,141 @@
 +// Browser front end: the engine (loading, the frame loop, audio). It runs on the page's own thread (the
 +// default) or in a worker (worker.js, with ?worker=1), with the same messages either way. Messages to it: load (a
-+// zip's bytes or a folder's files), input, pause, resume, audioPort (a MessagePort to the page's AudioWorklet).
-+// Messages from it: ready, loaded, frame (RGBA), stopped.
++// zip's bytes or a folder's files), input, screen (the screen's look), pause, resume, audioPort (a MessagePort to
++// the page's AudioWorklet). Messages from it: ready, loaded, frame (RGBA, width by height), stopped.
 +"use strict";
 +function createCrankedEngine(postMessage, transfers) {
 +
@@ -1686,13 +1896,19 @@ index 0000000..ca38e68
 +let M = null, running = false, paused = false, timer = 0, last = 0, carry = 0;
 +let input = { buttons: 0, crank: 0, docked: true };
 +let audioPort = null, audioPtr = 0, frameMs = 0;
-+let frameFn, audioFn, failedFn;
++let frameFn, audioFn, failedFn, renderFn, renderWidthFn, renderHeightFn;
++// the screen's look, as web_render takes it (flags: 1 blend frames, 2 pixel grid, 4 pixel shadow, 8 scanlines,
++// 16 device frame)
++let screenFx = { colors: 0, flags: 0, light: 0, tiltX: 0, tiltY: 0, scale: 1 };
 +
 +createCranked({ printErr: t => console.warn(t), print: t => console.log(t) }).then(module => {
 +  M = module;
 +  frameFn = M.cwrap("web_frame", "number", ["number", "number", "number", "number"]);
 +  audioFn = M.cwrap("web_audio", null, ["number", "number"]);
 +  failedFn = M.cwrap("web_failed", "number", []);
++  renderFn = M.cwrap("web_render", "number", ["number", "number", "number", "number", "number", "number"]);
++  renderWidthFn = M.cwrap("web_render_width", "number", []);
++  renderHeightFn = M.cwrap("web_render_height", "number", []);
 +  audioPtr = M._malloc(RATE * 4);
 +  try { M.FS.mkdir("/appData"); } catch (e) {}
 +  M.FS.mount(M.IDBFS, {}, "/appData");
@@ -1732,6 +1948,16 @@ index 0000000..ca38e68
 +  if (ok) { running = true; paused = false; last = 0; carry = 0; frameMs = 0; schedule(0); }
 +}
 +
++// The frame as shown: the screen through its look (ScreenEffects)
++function postFrame() {
++  const fx = screenFx;
++  const ptr = renderFn(fx.colors, fx.flags, fx.light, fx.tiltX, fx.tiltY, fx.scale);
++  if (!ptr) return;
++  const width = renderWidthFn(), height = renderHeightFn();
++  const rgba = M.HEAPU8.slice(ptr, ptr + width * height * 4); // a copy, so it can be transferred
++  postMessage({ type: "frame", rgba: rgba.buffer, width, height, frameMs }, transfers ? [rgba.buffer] : undefined);
++}
++
 +function stop() { running = false; clearTimeout(timer); }
 +function schedule(delay) { clearTimeout(timer); timer = setTimeout(step, delay); }
 +
@@ -1743,10 +1969,7 @@ index 0000000..ca38e68
 +  const ptr = frameFn(input.buttons, input.crank, input.docked ? 1 : 0, Math.round(dt * 1000));
 +  const spent = performance.now() - now;
 +  frameMs = frameMs ? frameMs * 0.95 + spent * 0.05 : spent;
-+  if (ptr) {
-+    const rgba = M.HEAPU8.slice(ptr, ptr + 400 * 240 * 4); // a copy, so it can be transferred
-+    postMessage({ type: "frame", rgba: rgba.buffer, frameMs }, transfers ? [rgba.buffer] : undefined);
-+  }
++  if (ptr) postFrame();
 +  carry += RATE * dt / 1000; const frames = Math.min(Math.floor(carry), RATE); carry -= Math.floor(carry);
 +  if (frames > 0) {
 +    audioFn(audioPtr, frames);
@@ -1763,6 +1986,7 @@ index 0000000..ca38e68
 +  const msg = e.data;
 +  if (msg.type === "load") { if (M) load(msg); }
 +  else if (msg.type === "input") input = msg.input;
++  else if (msg.type === "screen") { screenFx = msg.screen; if (M && running && paused) postFrame(); } // drawn again while paused
 +  else if (msg.type === "pause") { paused = true; clearTimeout(timer); if (M) M.FS.syncfs(false, () => {}); }
 +  else if (msg.type === "resume") { if (running && paused) { paused = false; last = 0; schedule(0); } }
 +  else if (msg.type === "audioPort") audioPort = msg.port;
@@ -1941,10 +2165,10 @@ HcmV?d00001
 
 diff --git a/web/index.html b/web/index.html
 new file mode 100644
-index 0000000..adf030f
+index 0000000..8735412
 --- /dev/null
 +++ b/web/index.html
-@@ -0,0 +1,536 @@
+@@ -0,0 +1,612 @@
 +<!doctype html>
 +<!-- Browser front end for Cranked (WebAssembly). Serve this folder over HTTP with cranked.js and cranked.wasm. -->
 +<html lang="en">
@@ -1971,8 +2195,14 @@ index 0000000..adf030f
 +  .sub { margin: 0; color: var(--muted); font-size: 14px; }
 +  .screen { background: #000; border-radius: 10px; padding: 12px; display: flex; justify-content: center; align-items: center; position: relative; }
 +  .screen:fullscreen { border-radius: 0; padding: 0; }
-+  canvas { width: 100%; max-width: 800px; aspect-ratio: 5 / 3; image-rendering: pixelated; background: #b1aea7; display: block; }
-+  .screen:fullscreen canvas { max-width: none; width: min(100vw, calc(100vh * 5 / 3)); }
++  /* --ar: the shown image's width over its height (the screen's 5 / 3, or the drawn device's) */
++  canvas { width: 100%; max-width: 800px; aspect-ratio: var(--ar, 1.6667); image-rendering: pixelated; background: #b1aea7; display: block; }
++  canvas.device { background: transparent; }
++  .screen:fullscreen canvas { max-width: none; width: min(100vw, calc(100vh * var(--ar, 1.6667))); }
++  .look { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; margin-top: 8px; }
++  .look label { display: inline-flex; gap: 6px; align-items: center; }
++  .look [hidden] { display: none; }
++  .look select, .look input[type=range] { font: inherit; }
 +  .paused::after { content: "Paused"; position: absolute; inset: auto 0 18px; text-align: center; color: #fff; font-weight: 600; letter-spacing: .05em; text-shadow: 0 1px 3px #000; }
 +  .bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 12px 0; }
 +  label.btn, a.btn, button { border: 1px solid var(--line); background: var(--panel); color: var(--fg); border-radius: 8px;
@@ -2063,6 +2293,22 @@ index 0000000..adf030f
 +    <p class="empty" id="empty">Games you open are kept here, in this browser, to play again without picking the file.</p>
 +  </div>
 +
++  <details id="lookPanel">
++    <summary>Screen</summary>
++    <div class="look">
++      <label>Colors <select id="lookColors"></select></label>
++      <label><input type="checkbox" id="lookBlend"> Blend frames</label>
++      <label><input type="checkbox" id="lookGrid"> Pixel grid</label>
++      <label><input type="checkbox" id="lookShadow"> Pixel shadow</label>
++      <label>Room light <input type="range" id="lookLight" min="0" max="1" step="0.05" value="0"></label>
++      <label id="lookTiltLabel" hidden><input type="checkbox" id="lookTilt"> Tilting the phone moves the light</label>
++      <label><input type="checkbox" id="lookScan"> Scanlines (CRT)</label>
++      <label><input type="checkbox" id="lookDevice"> Device frame</label>
++      <button id="lookReset" type="button">Reset</button>
++    </div>
++    <p class="empty">Blend frames mixes each frame with the one before, as the eye does with pixels a game flickers to make
++      grey. The device frame's buttons light up as they are pressed, and its crank turns.</p>
++  </details>
 +  <details>
 +    <summary>Controls</summary>
 +    <table>
@@ -2122,7 +2368,7 @@ index 0000000..adf030f
 +    if (pendingEntry) remember(pendingEntry, msg.info);
 +  } else if (msg.type === "saves") savesExported(msg);
 +  else if (msg.type === "imported") savesImported(msg);
-+  else if (msg.type === "frame") { latest = msg.rgba; frameMs = msg.frameMs; }
++  else if (msg.type === "frame") { latest = msg.rgba; latestWidth = msg.width; latestHeight = msg.height; frameMs = msg.frameMs; }
 +  else if (msg.type === "stopped") { setStatus(msg.error); running = false; updateButtons(); }
 +};
 +worker.onerror = e => setStatus("The engine could not start: " + (e.message || "worker error"));
@@ -2347,9 +2593,10 @@ index 0000000..adf030f
 +  else if (!document.hidden && hiddenPause) { hiddenPause = false; setPaused(false); }
 +});
 +$("full").onclick = () => { if (document.fullscreenElement) document.exitFullscreen(); else screen.requestFullscreen().catch(() => {}); };
-+$("shot").onclick = () => {
-+  const c = document.createElement("canvas"); c.width = 800; c.height = 480;
-+  const g = c.getContext("2d"); g.imageSmoothingEnabled = false; g.drawImage($("lcd"), 0, 0, 800, 480);
++$("shot").onclick = () => { // at least 800 pixels wide, at a whole multiple of the image
++  const lcd = $("lcd"), k = Math.max(1, Math.ceil(800 / lcd.width));
++  const c = document.createElement("canvas"); c.width = lcd.width * k; c.height = lcd.height * k;
++  const g = c.getContext("2d"); g.imageSmoothingEnabled = false; g.drawImage(lcd, 0, 0, c.width, c.height);
 +  c.toBlob(blob => {
 +    const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
 +    a.download = (currentTitle || "cranked").replace(/[^\w-]+/g, "_") + "-" + new Date().toISOString().replace(/[:.]/g, "-") + ".png";
@@ -2402,7 +2649,7 @@ index 0000000..adf030f
 +// ---------- input ----------
 +function turn(degrees) { crank = ((crank + degrees) % 360 + 360) % 360; docked = false; sendInput(); }
 +addEventListener("keydown", e => {
-+  if (e.target instanceof HTMLInputElement) return;
++  if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
 +  if (e.code in BUTTONS) { buttons |= BUTTONS[e.code]; e.preventDefault(); sendInput(); }
 +  else if (e.code === "Comma") turn(-10);
 +  else if (e.code === "Period") turn(10);
@@ -2460,14 +2707,67 @@ index 0000000..adf030f
 +  if (bits) ensureAudio();
 +}
 +
++// ---------- the screen's look: colors and effects, drawn by the engine (ScreenEffects), kept in this browser ----------
++const COLOR_PRESETS = ["Playdate", "Bright room", "Paper", "Game Boy", "Amber", "High contrast"]; // as in ScreenEffects.cpp
++const LOOK_DEFAULT = { colors: 0, blend: false, grid: false, shadow: false, light: 0, tilt: false, scan: false, device: false };
++let look = { ...LOOK_DEFAULT }, tiltX = 0, tiltY = 0;
++try { Object.assign(look, JSON.parse(load("cranked.look") || "{}")); } catch (e) {}
++for (const [i, name] of COLOR_PRESETS.entries()) $("lookColors").append(new Option(name, i));
++const lookInputs = { colors: "lookColors", blend: "lookBlend", grid: "lookGrid", shadow: "lookShadow", light: "lookLight", tilt: "lookTilt", scan: "lookScan", device: "lookDevice" };
++function showLook() {
++  for (const [key, id] of Object.entries(lookInputs)) { const el = $(id); if (el.type === "checkbox") el.checked = look[key]; else el.value = look[key]; }
++}
++// the whole scale to draw at: the effects that work on parts of a pixel need the size the image is shown at
++function lookScale() {
++  if (!(look.grid || look.shadow || look.scan || look.device)) return 1;
++  const unit = look.device ? 630 : 400; // the drawn device's width (ScreenEffects::outputSize), or the screen's
++  const shown = $("lcd").getBoundingClientRect().width * (devicePixelRatio || 1);
++  return Math.min(4, Math.max(1, Math.ceil(shown / unit - 0.01)));
++}
++function sendLook() {
++  const flags = (look.blend ? 1 : 0) | (look.grid ? 2 : 0) | (look.shadow ? 4 : 0) | (look.scan ? 8 : 0) | (look.device ? 16 : 0);
++  const unit = look.device ? [630, 504] : [400, 240];
++  $("lcd").style.setProperty("--ar", (unit[0] / unit[1]).toFixed(4));
++  $("lcd").classList.toggle("device", look.device);
++  worker.postMessage({ type: "screen", screen: { colors: +look.colors, flags, light: +look.light, tiltX: look.tilt ? tiltX : 0, tiltY: look.tilt ? tiltY : 0, scale: lookScale() } });
++}
++function lookChanged() {
++  for (const [key, id] of Object.entries(lookInputs)) { const el = $(id); look[key] = el.type === "checkbox" ? el.checked : el.type === "range" ? +el.value : +el.value; }
++  store("cranked.look", JSON.stringify(look));
++  sendLook();
++}
++for (const id of Object.values(lookInputs)) $(id).addEventListener("input", lookChanged);
++$("lookReset").onclick = () => { look = { ...LOOK_DEFAULT }; showLook(); lookChanged(); };
++// a phone's tilt moves the room's light (iOS asks first, from the tap that turns it on)
++if (typeof DeviceOrientationEvent !== "undefined" && navigator.maxTouchPoints > 0) {
++  $("lookTiltLabel").hidden = false;
++  $("lookTilt").addEventListener("change", e => {
++    if (e.target.checked && typeof DeviceOrientationEvent.requestPermission === "function")
++      DeviceOrientationEvent.requestPermission().then(r => { if (r !== "granted") { e.target.checked = false; lookChanged(); } }).catch(() => {});
++  });
++  let lastTilt = 0;
++  addEventListener("deviceorientation", e => {
++    if (!look.tilt || !look.light || e.gamma === null) return;
++    tiltX = Math.max(-1, Math.min(1, e.gamma / 40)); // left and right
++    tiltY = Math.max(-1, Math.min(1, (e.beta - 45) / 40)); // toward and away, from a phone held at 45 degrees
++    const now = performance.now(); if (now - lastTilt > 50) { lastTilt = now; sendLook(); } // at most 20 times a second
++  });
++}
++new ResizeObserver(() => sendLook()).observe($("lcd")); // the scale follows the shown size
++showLook(); sendLook();
++
 +// ---------- drawing: the newest frame from the worker, once per animation frame ----------
-+let image = null, shownAt = 0;
++let image = null, shownAt = 0, latestWidth = 400, latestHeight = 240;
 +function draw(time) {
 +  pollPads();
 +  if (latest) {
 +    const data = new Uint8ClampedArray(latest); latest = null;
-+    if (!image) image = new ImageData(400, 240);
++    const lcd = $("lcd");
++    if (lcd.width !== latestWidth || lcd.height !== latestHeight) { lcd.width = latestWidth; lcd.height = latestHeight; }
++    if (!image || image.width !== latestWidth || image.height !== latestHeight) image = new ImageData(latestWidth, latestHeight);
 +    image.data.set(data); ctx2d.putImageData(image, 0, 0);
++    // drawn larger than shown: smoothed when shrunk, so the grid's lines do not come and go; else crisp
++    lcd.style.imageRendering = lcd.width > lcd.getBoundingClientRect().width * (devicePixelRatio || 1) + 1 ? "auto" : "pixelated";
 +  }
 +  dial.style.setProperty("--angle", crank + "deg");
 +  if (running && !paused && time - shownAt > 500) { shownAt = time; setStatus("Running \u00b7 " + frameMs.toFixed(2) + " ms per step"); }
@@ -2483,15 +2783,16 @@ index 0000000..adf030f
 +</html>
 diff --git a/web/main.cpp b/web/main.cpp
 new file mode 100644
-index 0000000..f8fdee9
+index 0000000..951cd3b
 --- /dev/null
 +++ b/web/main.cpp
-@@ -0,0 +1,102 @@
+@@ -0,0 +1,121 @@
 +// Browser front end (WebAssembly, Emscripten). The page drives it: it writes the game into the in-memory
 +// file system, calls web_load, then web_frame once per animation frame with the input and the elapsed time, and draws
 +// the returned RGBA frame; web_audio fills the audio queue. The game's clock is virtual and advanced by the page, so a
 +// hidden tab (no animation frames) pauses the game instead of making it jump ahead.
 +#include "Cranked.hpp"
++#include "ScreenEffects.hpp"
 +
 +#include <emscripten/emscripten.h>
 +#include <cstdio>
@@ -2502,6 +2803,7 @@ index 0000000..f8fdee9
 +static Cranked *instance;
 +static bool failed;
 +static std::string lastError; // shown by the page
++static ScreenEffects screenEffects;
 +
 +template<typename F>
 +static bool guarded(const char *what, F &&f) {
@@ -2528,6 +2830,7 @@ index 0000000..f8fdee9
 +        delete instance;
 +    }
 +    instance = new Cranked;
++    screenEffects.reset();
 +    instance->useVirtualClock();
 +    instance->crankDocked = true;
 +    failed = false;
@@ -2559,6 +2862,22 @@ index 0000000..f8fdee9
 +    }
 +    return (const uint8_t *) instance->graphics.displayBufferRGBA;
 +}
++
++// The frame through the screen's effects: a color preset, flags (1 blend frames, 2 pixel grid, 4 pixel shadow,
++// 8 scanlines, 16 device frame), the room's light and tilt, at a whole scale. RGBA bytes, web_render_width() by
++// web_render_height().
++EMSCRIPTEN_KEEPALIVE const uint8_t *web_render(int colors, int flags, float light, float tiltX, float tiltY, int scale) {
++    if (!instance)
++        return nullptr;
++    ScreenEffectSettings settings;
++    settings.colors = colors;
++    settings.blendFrames = flags & 1; settings.pixelGrid = flags & 2; settings.pixelShadow = flags & 4;
++    settings.scanlines = flags & 8; settings.deviceFrame = flags & 16;
++    settings.roomLight = light; settings.tiltX = tiltX; settings.tiltY = tiltY;
++    return (const uint8_t *) screenEffects.render(*instance, settings, scale, ScreenEffects::Format::RGBA);
++}
++EMSCRIPTEN_KEEPALIVE int web_render_width() { return screenEffects.width; }
++EMSCRIPTEN_KEEPALIVE int web_render_height() { return screenEffects.height; }
 +
 +// Interleaved stereo 16-bit samples at 44.1 kHz (silence once the game has stopped)
 +EMSCRIPTEN_KEEPALIVE void web_audio(int16_t *out, int frames) {
@@ -2610,13 +2929,13 @@ index 0000000..07a9155
 +}
 diff --git a/web/sw.js b/web/sw.js
 new file mode 100644
-index 0000000..cde28cc
+index 0000000..103b9c2
 --- /dev/null
 +++ b/web/sw.js
 @@ -0,0 +1,11 @@
 +// Service worker for the browser front end: the page, the engine and the icons are cached, so the page
 +// works offline once loaded. Bump VERSION when any of the files change.
-+const VERSION = "cranked-5";
++const VERSION = "cranked-6";
 +const FILES = ["./", "index.html", "engine.js", "worker.js", "audio-worklet.js", "zip.js", "cranked.js", "cranked.wasm", "manifest.webmanifest", "icon-192.png", "icon-512.png"];
 +self.addEventListener("install", e => e.waitUntil(caches.open(VERSION).then(c => c.addAll(FILES)).then(() => self.skipWaiting())));
 +self.addEventListener("activate", e => e.waitUntil(caches.keys().then(keys =>
