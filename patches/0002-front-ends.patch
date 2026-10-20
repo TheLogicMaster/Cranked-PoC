@@ -585,6 +585,719 @@ index 623038a..1db80e8 100644
  
      SDL_DestroyTexture(displayTexture);
  
+diff --git a/dos/CMakeLists.txt b/dos/CMakeLists.txt
+new file mode 100644
+index 0000000..c4321e0
+--- /dev/null
++++ b/dos/CMakeLists.txt
+@@ -0,0 +1,4 @@
++# DOS front end (DJGPP only): cranked.exe, which needs a DPMI host (HDPMI32 or CWSDPMI) to run
++add_executable(cranked_dos main.cpp)
++target_link_libraries(cranked_dos cranked)
++set_target_properties(cranked_dos PROPERTIES OUTPUT_NAME cranked)
+diff --git a/dos/main.cpp b/dos/main.cpp
+new file mode 100644
+index 0000000..9fb4c9e
+--- /dev/null
++++ b/dos/main.cpp
+@@ -0,0 +1,697 @@
++// DOS front end (DJGPP, 32-bit protected mode under a DPMI host). Needs a 386 or better with a VGA; a Sound Blaster
++// 16 is used when the BLASTER variable names one, and a mouse driver when one is loaded.
++//
++//   CRANKED [options] <game.pdx | game.zip>
++//     -1          640x480 VGA at the display's own size (default: 800x600 at double size when the VESA BIOS has it)
++//     -q          no sound
++//     -t <secs>   stop after this much game time
++//     -shot <file.bmp>  write the last frame as a BMP when the game ends (for scripted runs)
++//
++// Keys: arrows (or the numeric keypad) for the d-pad; Z or A for B; X or S for A; Enter for the menu; comma and
++// period turn the crank, C docks and undocks it, and moving the mouse left and right turns it too. P pauses,
++// F5 restarts the game, F12 saves a screenshot (CRANKnnn.BMP), Esc quits.
++//
++// The game's clock is virtual and advances with uclock(), the PIT-based timer (the DOS clock's 55 ms ticks are too
++// coarse for frame pacing), by at most 100 ms an update: a host too slow for the game slows it down rather than
++// making it skip ahead.
++#include "Cranked.hpp"
++
++#include <dpmi.h>
++#include <go32.h>
++#include <pc.h>
++#include <sys/movedata.h>
++#include <sys/farptr.h>
++#include <crt0.h>
++#include <unistd.h>
++
++#include <algorithm>
++#include <array>
++#include <csignal>
++#include <cstdarg>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <ctime>
++#include <string>
++#include <string_view>
++
++using namespace cranked;
++
++// no paging to disk under the hosts DOS has, but the interrupt handlers' code and data must stay put: lock the lot
++int _crt0_startup_flags = _CRT0_FLAG_LOCK_MEMORY;
++
++namespace {
++
++constexpr int WIDTH = DISPLAY_WIDTH, HEIGHT = DISPLAY_HEIGHT, ROW_BYTES = WIDTH / 8;
++
++// Real mode interrupts through the DPMI host
++__dpmi_regs realInt(int number, __dpmi_regs regs) {
++    __dpmi_int(number, &regs);
++    return regs;
++}
++
++// ---- Interrupt handlers, installed through IRET wrappers ----
++
++struct Handler {
++    int vector = -1;
++    _go32_dpmi_seginfo old{}, wrapper{};
++
++    bool install(int vec, void (*function)()) {
++        _go32_dpmi_get_protected_mode_interrupt_vector(vec, &old);
++        wrapper.pm_offset = (unsigned long) function;
++        wrapper.pm_selector = (unsigned short) _go32_my_cs();
++        if (_go32_dpmi_allocate_iret_wrapper(&wrapper) != 0)
++            return false;
++        if (_go32_dpmi_set_protected_mode_interrupt_vector(vec, &wrapper) != 0) {
++            _go32_dpmi_free_iret_wrapper(&wrapper);
++            return false;
++        }
++        vector = vec;
++        return true;
++    }
++
++    void remove() {
++        if (vector < 0)
++            return;
++        _go32_dpmi_set_protected_mode_interrupt_vector(vector, &old);
++        _go32_dpmi_free_iret_wrapper(&wrapper);
++        vector = -1;
++    }
++};
++
++// ---- Keyboard: scan codes from port 60h, set 1; 0xE0-prefixed keys at 128 + code ----
++
++volatile uint8_t keyDown[256];
++volatile uint8_t keyPressed[256]; // set on each make code (counts typematic repeats too), cleared by the main loop
++volatile bool keyExtended;
++Handler keyboardHandler;
++
++void keyboardInterrupt() {
++    uint8_t code = inportb(0x60);
++    if (code == 0xE0)
++        keyExtended = true;
++    else {
++        int index = (code & 0x7F) | (keyExtended ? 0x80 : 0);
++        keyExtended = false;
++        if (code & 0x80)
++            keyDown[index] = 0;
++        else {
++            keyDown[index] = 1;
++            keyPressed[index] = 1;
++        }
++    }
++    outportb(0x20, 0x20);
++}
++
++enum Scan : int {
++    ESC = 0x01, KEY_A = 0x1E, KEY_S = 0x1F, KEY_Z = 0x2C, KEY_X = 0x2D, KEY_C = 0x2E, KEY_P = 0x19, COMMA = 0x33,
++    PERIOD = 0x34, ENTER = 0x1C, F5 = 0x3F, F12 = 0x58, UP = 0x48, LEFT = 0x4B, RIGHT = 0x4D, DOWN = 0x50,
++    EXT = 0x80,
++};
++
++bool held(int code) { return keyDown[code] != 0; }
++bool heldEither(int code) { return held(code) or held(code | EXT); } // the arrows and their keypad keys
++
++bool pressed(int code) {
++    if (!keyPressed[code])
++        return false;
++    keyPressed[code] = 0;
++    return true;
++}
++
++// ---- Display: a 16-color planar VGA mode, writing plane 0 only, so each byte is eight pixels of color 0 or 1 ----
++
++struct Display {
++    int stride = 80, left = 15, top = 120; // bytes per row, the display's position in bytes and rows
++    bool doubled = false;
++    bool active = false;
++    uint8_t previous[HEIGHT][ROW_BYTES];
++    bool previousValid = false;
++    uint16_t doubleBits[256]; // each bit twice
++
++    bool setVesa800() {
++        // the mode's attributes: supported, graphics; its bytes per scan line
++        __dpmi_regs r{};
++        r.x.ax = 0x4F01;
++        r.x.cx = 0x102;
++        r.x.es = __tb >> 4;
++        r.x.di = __tb & 0x0F;
++        r = realInt(0x10, r);
++        if (r.x.ax != 0x004F)
++            return false;
++        uint8_t info[256];
++        dosmemget(__tb, sizeof info, info);
++        if (!(info[0] & 1))
++            return false;
++        int bytesPerLine = info[0x10] | info[0x11] << 8;
++        r = {};
++        r.x.ax = 0x4F02;
++        r.x.bx = 0x102;
++        r = realInt(0x10, r);
++        if (r.x.ax != 0x004F)
++            return false;
++        stride = bytesPerLine ? bytesPerLine : 100;
++        left = (800 - WIDTH * 2) / 16;
++        top = (600 - HEIGHT * 2) / 2;
++        doubled = true;
++        return true;
++    }
++
++    void setVga640() {
++        __dpmi_regs r{};
++        r.x.ax = 0x0012;
++        realInt(0x10, r);
++        stride = 80;
++        left = (640 - WIDTH) / 16;
++        top = (480 - HEIGHT) / 2;
++        doubled = false;
++    }
++
++    static void setColor(int index, uint32_t rgba) { // 6-bit DAC values
++        outportb(0x3C8, index);
++        outportb(0x3C9, (rgba >> 26) & 0x3F);
++        outportb(0x3C9, (rgba >> 18) & 0x3F);
++        outportb(0x3C9, (rgba >> 10) & 0x3F);
++    }
++
++    void open(bool allowDouble, uint32_t on, uint32_t off) {
++        if (!allowDouble or !setVesa800())
++            setVga640();
++        active = true;
++        for (int v = 0; v < 256; v++) {
++            uint16_t bits = 0;
++            for (int k = 0; k < 8; k++)
++                if (v & (0x80 >> k))
++                    bits |= 0xC000 >> (k * 2);
++            doubleBits[v] = (uint16_t) (bits >> 8 | bits << 8); // the high byte first in memory
++        }
++        setColor(0, off);
++        setColor(1, on);
++        // the border (overscan) in the dark color too, as the area around the display
++        inportb(0x3DA);
++        outportb(0x3C0, 0x11 | 0x20);
++        outportb(0x3C0, 0x00);
++        outportb(0x3C4, 0x02); // sequencer map mask: plane 0
++        outportb(0x3C5, 0x01);
++        previousValid = false;
++    }
++
++    void close() {
++        if (!active)
++            return;
++        __dpmi_regs r{};
++        r.x.ax = 0x0003;
++        realInt(0x10, r);
++        active = false;
++    }
++
++    // the 1-bit picture of the RGBA display buffer (which has the system menu drawn in): lit where red is bright
++    static void pack(const Cranked &cranked, uint8_t out[HEIGHT][ROW_BYTES]) {
++        for (int y = 0; y < HEIGHT; y++) {
++            auto *row = (const uint8_t *) cranked.graphics.displayBufferRGBA[y];
++            for (int b = 0; b < ROW_BYTES; b++) {
++                uint8_t bits = 0;
++                for (int k = 0; k < 8; k++)
++                    bits = (uint8_t) (bits << 1 | (row[(b * 8 + k) * 4] >= 0x70 ? 1 : 0));
++                out[y][b] = bits;
++            }
++        }
++    }
++
++    void present(const Cranked &cranked) {
++        uint8_t frame[HEIGHT][ROW_BYTES];
++        pack(cranked, frame);
++        for (int y = 0; y < HEIGHT; y++) {
++            if (previousValid and memcmp(frame[y], previous[y], ROW_BYTES) == 0)
++                continue;
++            memcpy(previous[y], frame[y], ROW_BYTES);
++            if (doubled) {
++                uint16_t wide[ROW_BYTES];
++                for (int b = 0; b < ROW_BYTES; b++)
++                    wide[b] = doubleBits[frame[y][b]];
++                unsigned long address = 0xA0000 + (unsigned long) (top + y * 2) * stride + left;
++                dosmemput(wide, sizeof wide, address);
++                dosmemput(wide, sizeof wide, address + stride);
++            } else
++                dosmemput(frame[y], ROW_BYTES, 0xA0000 + (unsigned long) (top + y) * stride + left);
++        }
++        previousValid = true;
++    }
++};
++
++Display display;
++
++// a 1-bit BMP of the display buffer
++bool writeBmp(const Cranked &cranked, const char *path, uint32_t on, uint32_t off) {
++    uint8_t frame[HEIGHT][ROW_BYTES];
++    Display::pack(cranked, frame);
++    FILE *file = fopen(path, "wb");
++    if (!file)
++        return false;
++    constexpr int rowSize = (ROW_BYTES + 3) & ~3, dataOffset = 14 + 40 + 8, size = dataOffset + rowSize * HEIGHT;
++    uint8_t header[dataOffset]{};
++    auto put16 = [&](int at, int v) { header[at] = (uint8_t) v; header[at + 1] = (uint8_t) (v >> 8); };
++    auto put32 = [&](int at, uint32_t v) { put16(at, (int) (v & 0xFFFF)); put16(at + 2, (int) (v >> 16)); };
++    header[0] = 'B'; header[1] = 'M';
++    put32(2, size); put32(10, dataOffset);
++    put32(14, 40); put32(18, WIDTH); put32(22, HEIGHT); put16(26, 1); put16(28, 1);
++    put32(34, rowSize * HEIGHT); put32(38, 2835); put32(42, 2835); put32(46, 2); put32(50, 2);
++    auto putColor = [&](int at, uint32_t rgba) { header[at] = (uint8_t) (rgba >> 8); header[at + 1] = (uint8_t) (rgba >> 16); header[at + 2] = (uint8_t) (rgba >> 24); };
++    putColor(54, off);
++    putColor(58, on);
++    bool ok = fwrite(header, sizeof header, 1, file) == 1;
++    for (int y = HEIGHT - 1; y >= 0 and ok; y--) {
++        uint8_t row[rowSize]{};
++        memcpy(row, frame[y], ROW_BYTES);
++        ok = fwrite(row, rowSize, 1, file) == 1;
++    }
++    return fclose(file) == 0 and ok;
++}
++
++// ---- Mouse: horizontal motion turns the crank ----
++
++bool mousePresent;
++
++void openMouse() {
++    __dpmi_regs r{};
++    r.x.ax = 0x0000;
++    r = realInt(0x33, r);
++    mousePresent = r.x.ax == 0xFFFF;
++}
++
++int mouseMotionX() { // mickeys since the last call
++    if (!mousePresent)
++        return 0;
++    __dpmi_regs r{};
++    r.x.ax = 0x000B;
++    r = realInt(0x33, r);
++    return (int16_t) r.x.cx;
++}
++
++// ---- Sound Blaster 16: 44.1 kHz 16-bit stereo, auto-initialized DMA from a ring in conventional memory ----
++
++struct SoundBlaster {
++    static constexpr int FRAMES = 4096; // the ring: about 93 ms
++    int base = 0, irq = 0, dma16 = 0;
++    int dosSegment = 0, dosSelector = 0;
++    unsigned long physical = 0; // the ring's address
++    int writeFrame = 0;
++    bool active = false;
++    Handler handler;
++
++    static inline int ackPort; // the handler's copy of base + 0xF
++    static inline int handlerIrq;
++
++    static void interrupt() {
++        inportb(ackPort); // acknowledges a 16-bit transfer's interrupt
++        if (handlerIrq >= 8)
++            outportb(0xA0, 0x20);
++        outportb(0x20, 0x20);
++    }
++
++    bool dspWrite(int value) {
++        for (int i = 0; i < 65536; i++)
++            if (!(inportb(base + 0xC) & 0x80)) {
++                outportb(base + 0xC, value);
++                return true;
++            }
++        return false;
++    }
++
++    int dspRead() {
++        for (int i = 0; i < 65536; i++)
++            if (inportb(base + 0xE) & 0x80)
++                return inportb(base + 0xA);
++        return -1;
++    }
++
++    bool reset() {
++        outportb(base + 6, 1);
++        for (int i = 0; i < 100; i++)
++            inportb(base + 6); // a few microseconds
++        outportb(base + 6, 0);
++        for (int i = 0; i < 100; i++)
++            if (dspRead() == 0xAA)
++                return true;
++        return false;
++    }
++
++    // BLASTER=A220 I5 D1 H5 T6
++    bool parseBlaster() {
++        const char *blaster = getenv("BLASTER");
++        if (!blaster)
++            return false;
++        for (const char *p = blaster; *p; p++) {
++            char c = (char) (*p & ~0x20);
++            if (c == 'A') base = (int) strtol(p + 1, nullptr, 16);
++            else if (c == 'I') irq = (int) strtol(p + 1, nullptr, 10);
++            else if (c == 'H') dma16 = (int) strtol(p + 1, nullptr, 10);
++        }
++        return base and irq and dma16 >= 5 and dma16 <= 7;
++    }
++
++    const char *open() {
++        if (!parseBlaster())
++            return "no Sound Blaster 16 in BLASTER (A, I and H are needed)";
++        if (!reset())
++            return "the Sound Blaster did not answer";
++        dspWrite(0xE1);
++        int major = dspRead();
++        dspRead();
++        if (major < 4)
++            return "the Sound Blaster is older than a Sound Blaster 16";
++        // twice the ring's size, so a ring that does not cross a 128 KB boundary fits in it (16-bit DMA cannot)
++        constexpr int bytes = FRAMES * 4;
++        dosSegment = __dpmi_allocate_dos_memory(bytes * 2 / 16, &dosSelector);
++        if (dosSegment < 0)
++            return "no conventional memory for the sound buffer";
++        physical = (unsigned long) dosSegment * 16;
++        if ((physical >> 17) != ((physical + bytes - 1) >> 17))
++            physical = (physical + bytes - 1) & ~0x1FFFFUL;
++        uint8_t zero[1024]{};
++        for (int at = 0; at < bytes; at += (int) sizeof zero)
++            dosmemput(zero, sizeof zero, physical + at);
++
++        ackPort = base + 0xF;
++        handlerIrq = irq;
++        int vector = irq < 8 ? 8 + irq : 0x70 + irq - 8;
++        if (!handler.install(vector, interrupt)) {
++            close();
++            return "could not install the sound interrupt handler";
++        }
++        if (irq >= 8) {
++            outportb(0xA1, inportb(0xA1) & ~(1 << (irq - 8)));
++            outportb(0x21, inportb(0x21) & ~0x04);
++        } else
++            outportb(0x21, inportb(0x21) & ~(1 << irq));
++
++        // DMA controller 2: mask, clear the flip-flop, single mode with auto-initialization reading memory, the
++        // address and count in words, then unmask
++        int channel = dma16 - 4;
++        static constexpr int addressPort[] { 0xC0, 0xC4, 0xC8, 0xCC }, countPort[] { 0xC2, 0xC6, 0xCA, 0xCE },
++                pagePort[] { 0x8F, 0x8B, 0x89, 0x8A };
++        unsigned long words = physical >> 1;
++        int count = bytes / 2 - 1;
++        outportb(0xD4, 0x04 | channel);
++        outportb(0xD8, 0);
++        outportb(0xD6, 0x58 | channel);
++        outportb(addressPort[channel], (int) (words & 0xFF));
++        outportb(addressPort[channel], (int) ((words >> 8) & 0xFF));
++        outportb(pagePort[channel], (int) ((physical >> 16) & 0xFE));
++        outportb(countPort[channel], count & 0xFF);
++        outportb(countPort[channel], (count >> 8) & 0xFF);
++        outportb(0xD4, channel);
++
++        // the DSP: the rate, then 16-bit auto-initialized output of signed stereo samples, interrupting each half
++        dspWrite(0x41);
++        dspWrite(44100 >> 8);
++        dspWrite(44100 & 0xFF);
++        int blockSamples = FRAMES * 2 / 2 - 1; // samples (left and right count separately) per half
++        dspWrite(0xB6);
++        dspWrite(0x30);
++        dspWrite(blockSamples & 0xFF);
++        dspWrite(blockSamples >> 8);
++        dspWrite(0xD1); // speaker on
++        writeFrame = FRAMES / 2; // half a ring ahead of the start
++        active = true;
++        return nullptr;
++    }
++
++    int playFrame() { // where the DMA controller is in the ring
++        int channel = dma16 - 4;
++        static constexpr int countPort[] { 0xC2, 0xC6, 0xCA, 0xCE };
++        int remaining = 0;
++        for (int tries = 0; tries < 3; tries++) { // the count changes between its two bytes now and then
++            outportb(0xD8, 0);
++            int a = inportb(countPort[channel]);
++            a |= inportb(countPort[channel]) << 8;
++            outportb(0xD8, 0);
++            int b = inportb(countPort[channel]);
++            b |= inportb(countPort[channel]) << 8;
++            remaining = b;
++            if (a - b >= 0 and a - b < 16)
++                break;
++        }
++        int wordsDone = FRAMES * 2 - (remaining + 1);
++        return ((wordsDone / 2) % FRAMES + FRAMES) % FRAMES;
++    }
++
++    void fill(Cranked *cranked) {
++        if (!active)
++            return;
++        int play = playFrame();
++        int space = (play - writeFrame + FRAMES) % FRAMES; // frames between what is written and what plays
++        space -= 64;                                       // a little room for the controller moving on meanwhile
++        while (space > 0) {
++            int16_t samples[512 * 2];
++            int n = std::min({ space, 512, FRAMES - writeFrame });
++            if (cranked)
++                cranked->audio.sampleAudio(samples, n);
++            else
++                memset(samples, 0, (size_t) n * 4);
++            dosmemput(samples, (size_t) n * 4, physical + (unsigned long) writeFrame * 4);
++            writeFrame = (writeFrame + n) % FRAMES;
++            space -= n;
++        }
++    }
++
++    void close() {
++        if (active) {
++            dspWrite(0xD5); // pause 16-bit output
++            dspWrite(0xD9); // and end the auto-initialized transfer
++            dspWrite(0xD3); // speaker off
++            outportb(0xD4, 0x04 | (dma16 - 4));
++            reset();
++            active = false;
++        }
++        handler.remove();
++        if (dosSelector) {
++            __dpmi_free_dos_memory(dosSelector);
++            dosSelector = 0;
++        }
++    }
++};
++
++SoundBlaster blaster;
++
++// everything back as it was, from any way out (a normal exit, an error, a signal)
++void restore() {
++    blaster.close();
++    keyboardHandler.remove();
++    display.close();
++}
++
++void onSignal(int signal) {
++    restore();
++    std::signal(signal, SIG_DFL);
++    std::raise(signal);
++}
++
++// The log (the game's prints, errors): text written to the console would land on the graphics screen, so it goes to
++// CRANKED_LOG's file, and the last lines are kept to show when the game fails
++FILE *logFile;
++std::string recentLog[8];
++int recentCount;
++
++void logLine(Cranked &, LogLevel, const char *format, va_list args) {
++    char line[512];
++    std::vsnprintf(line, sizeof line, format, args);
++    if (logFile)
++        std::fprintf(logFile, "%s\n", line);
++    recentLog[recentCount++ % 8] = line;
++}
++
++// Testing in DOSBox-X: CRANKED_DOSBOX_CAPTURE has DOSBox-X save a screenshot when the game ends (1) and record the
++// sound while it runs (4), through its integration device at ports 28h-2Ah (enabled with "integration device=true")
++int dosboxCapture;
++
++void dosboxTrigger(int bits) {
++    outportb(0x2A, 0x00); // reset the byte latches; the registers are 32 bits, written a byte at a time
++    for (int b = 0; b < 4; b++)
++        outportb(0x28, (0x00C54010 >> (b * 8)) & 0xFF); // the capture trigger register
++    for (int b = 0; b < 4; b++)
++        outportb(0x29, b == 0 ? bits : 0);
++}
++
++double uclockMicros() {
++    return (double) uclock() * 1e6 / UCLOCKS_PER_SEC;
++}
++
++int usage() {
++    std::fputs("usage: cranked [-1] [-q] [-t <seconds>] [-shot <file.bmp>] <game.pdx | game.zip>\n", stderr);
++    return 2;
++}
++
++}
++
++int main(int argc, char **argv) {
++    bool allowDouble = true, quiet = false;
++    double timeLimit = 0;
++    const char *shotPath = nullptr, *gamePath = nullptr;
++    for (int i = 1; i < argc; i++) {
++        std::string_view arg = argv[i];
++        if (arg == "-1") allowDouble = false;
++        else if (arg == "-q") quiet = true;
++        else if (arg == "-t" and i + 1 < argc) timeLimit = std::atof(argv[++i]);
++        else if (arg == "-shot" and i + 1 < argc) shotPath = argv[++i];
++        else if (arg.starts_with("-")) return usage();
++        else gamePath = argv[i];
++    }
++    if (!gamePath)
++        return usage();
++    // COMMAND.COM cannot redirect the error output: CRANKED_LOG names a file for it and for the log
++    if (const char *log = getenv("CRANKED_LOG")) {
++        logFile = std::fopen(log, "w");
++        if (logFile)
++            std::setvbuf(logFile, nullptr, _IOLBF, 1024);
++    }
++
++    // the game's console output (print, logToConsole) goes to standard output: into the log file when there is
++    // one, nowhere when it is the screen (it would be drawn over the graphics), else where it was redirected
++    std::fflush(stdout);
++    if (logFile)
++        dup2(fileno(logFile), fileno(stdout));
++    else if (isatty(fileno(stdout)))
++        std::freopen("NUL", "w", stdout);
++    std::setvbuf(stdout, nullptr, _IOLBF, 1024);
++
++    auto *cranked = new Cranked;
++    cranked->config.loggingCallback = logLine;
++    cranked->useVirtualClock();
++    cranked->crankDocked = true;
++    std::string error;
++    try {
++        cranked->load(gamePath);
++    } catch (std::exception &e) {
++        std::fprintf(stderr, "Could not load %s: %s\n", gamePath, e.what());
++        if (logFile)
++            std::fprintf(logFile, "Could not load %s: %s\n", gamePath, e.what());
++        return 1;
++    }
++    uint32_t on = cranked->graphics.displayBufferOnColor, off = cranked->graphics.displayBufferOffColor;
++
++    std::atexit(restore);
++    for (int s : { SIGSEGV, SIGFPE, SIGILL, SIGABRT, SIGINT })
++        std::signal(s, onSignal);
++    const char *soundError = quiet ? nullptr : blaster.open();
++    if (!keyboardHandler.install(9, keyboardInterrupt)) {
++        restore();
++        std::fputs("Could not install the keyboard handler\n", stderr);
++        return 1;
++    }
++    openMouse();
++    display.open(allowDouble, on, off);
++    if (const char *capture = getenv("CRANKED_DOSBOX_CAPTURE"))
++        dosboxCapture = std::atoi(capture);
++    if (dosboxCapture & 4)
++        dosboxTrigger(4);
++
++    bool paused = false, quit = false;
++    int screenshots = 0, frames = 0;
++    double gameMicros = 0, startMicros = uclockMicros();
++    double updateMicros = 0, presentMicros = 0, soundMicros = 0; // where the time went, for the log
++    try {
++        cranked->start();
++        double last = uclockMicros();
++        auto lastFrame = cranked->lastFrameTime;
++        while (!quit and cranked->state != Cranked::State::Stopped) {
++            double now = uclockMicros();
++            double elapsed = std::min(now - last, 100000.0);
++            last = now;
++
++            if (pressed(ESC))
++                quit = true;
++            if (pressed(KEY_P))
++                paused = !paused;
++            if (pressed(F5)) {
++                cranked->reset();
++                cranked->start();
++            }
++            if (pressed(KEY_C))
++                cranked->crankDocked = !cranked->crankDocked;
++            if (pressed(F12)) {
++                char name[16];
++                std::snprintf(name, sizeof name, "CRANK%03d.BMP", screenshots++ % 1000);
++                writeBmp(*cranked, name, on, off);
++            }
++            float turn = (float) (mouseMotionX() * 0.75);
++            if (held(COMMA)) turn -= (float) (elapsed * 360e-6);
++            if (held(PERIOD)) turn += (float) (elapsed * 360e-6);
++            if (turn != 0) {
++                cranked->crankAngle = fmodf(fmodf(cranked->crankAngle + turn, 360) + 360, 360);
++                cranked->crankDocked = false;
++            }
++            int buttons = 0;
++            if (heldEither(LEFT)) buttons |= (int) PDButtons::Left;
++            if (heldEither(RIGHT)) buttons |= (int) PDButtons::Right;
++            if (heldEither(UP)) buttons |= (int) PDButtons::Up;
++            if (heldEither(DOWN)) buttons |= (int) PDButtons::Down;
++            if (held(KEY_Z) or held(KEY_A)) buttons |= (int) PDButtons::B;
++            if (held(KEY_X) or held(KEY_S)) buttons |= (int) PDButtons::A;
++            if (heldEither(ENTER)) buttons |= (int) PDButtons::Menu;
++            cranked->currentInputs = buttons;
++
++            if (!paused) {
++                cranked->advanceVirtualClock((int64) elapsed);
++                gameMicros += elapsed;
++                double t0 = uclockMicros();
++                cranked->update();
++                updateMicros += uclockMicros() - t0;
++                if (timeLimit > 0 and gameMicros >= timeLimit * 1e6)
++                    quit = true;
++            }
++            double t1 = uclockMicros();
++            blaster.fill(paused ? nullptr : cranked);
++            double t2 = uclockMicros();
++            soundMicros += t2 - t1;
++            if (cranked->lastFrameTime != lastFrame) {
++                lastFrame = cranked->lastFrameTime;
++                display.present(*cranked);
++                presentMicros += uclockMicros() - t2;
++                frames++;
++            } else
++                __dpmi_yield(); // gives the time to a multitasking host (Windows, DOSEMU); returns at once otherwise
++        }
++    } catch (std::exception &e) {
++        error = e.what();
++    } catch (...) {
++        error = "unknown error";
++    }
++    if (shotPath and !writeBmp(*cranked, shotPath, on, off))
++        std::fprintf(stderr, "Could not write %s\n", shotPath);
++    if (dosboxCapture & 1) { // the screen as it is, before the text mode returns
++        dosboxTrigger(1);
++        double until = uclockMicros() + 300000;
++        while (uclockMicros() < until) {}
++    }
++    if (dosboxCapture & 4)
++        dosboxTrigger(4); // the end of the sound recording
++    restore();
++    if (logFile) {
++        double seconds = (uclockMicros() - startMicros) / 1e6;
++        std::fprintf(logFile, "%d frames in %.1f s (%.1f per second), %.1f s of game time; per frame: update %.1f ms, "
++                     "display %.1f ms, sound %.1f ms\n", frames, seconds, seconds > 0 ? frames / seconds : 0.0,
++                     gameMicros / 1e6, updateMicros / 1e3 / std::max(frames, 1), presentMicros / 1e3 / std::max(frames, 1),
++                     soundMicros / 1e3 / std::max(frames, 1));
++    }
++    if (soundError) {
++        std::fprintf(stderr, "Sound: %s\n", soundError);
++        if (logFile)
++            std::fprintf(logFile, "Sound: %s\n", soundError);
++    }
++    try {
++        cranked->unload(); // the game saves its data when it ends
++    } catch (std::exception &e) {
++        if (error.empty())
++            error = e.what();
++    }
++    if (!error.empty()) {
++        for (int i = std::max(0, recentCount - 8); i < recentCount; i++)
++            std::fprintf(stderr, "%s\n", recentLog[i % 8].c_str());
++        std::fprintf(stderr, "The game stopped: %s\n", error.c_str());
++        if (logFile)
++            std::fprintf(logFile, "The game stopped: %s\n", error.c_str());
++        return 1;
++    }
++    return 0;
++}
 diff --git a/java/java.cpp b/java/java.cpp
 index 21b159e..5763622 100644
 --- a/java/java.cpp

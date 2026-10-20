@@ -41,6 +41,10 @@ on:
         description: libretro core for Android
         type: boolean
         default: false
+      dos:
+        description: DOS build (the DJGPP compiler is built once and cached, about 40 minutes)
+        type: boolean
+        default: false
 
 env:
   SDK_URL: https://download.panic.com/playdate_sdk/Linux/PlaydateSDK-3.1.1.tar.gz
@@ -230,6 +234,37 @@ jobs:
         with:
           name: cranked-poc-android
           path: dist/android
+
+  dos:
+    needs: sdk-assets
+    if: inputs.dos
+    runs-on: ubuntu-24.04
+    continue-on-error: true # experimental
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tools
+        run: sudo apt-get install -y ninja-build bison flex texinfo zlib1g-dev unzip m4 dos2unix nasm
+      - uses: actions/cache@v4
+        id: djgpp
+        with:
+          path: ~/djgpp
+          key: djgpp-${{ hashFiles('scripts/build-djgpp.sh') }}
+      - name: The DJGPP compiler
+        if: steps.djgpp.outputs.cache-hit != 'true'
+        run: scripts/build-djgpp.sh ~/djgpp
+      - name: Cranked at the pinned commit, patched
+        shell: bash
+        run: scripts/fetch-cranked.sh
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdk-assets
+          path: cranked/core/resources
+      - name: Build the DOS front end (interpreter)
+        run: DJGPP_PREFIX=~/djgpp scripts/build.sh dos
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cranked-poc-dos
+          path: dist/dos
 
   pages:
     if: inputs.web && inputs.publish && github.ref == 'refs/heads/main'

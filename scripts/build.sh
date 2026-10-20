@@ -11,6 +11,8 @@
 #   libretro-android  the libretro core for Android, interpreter (ANDROID_NDK_HOME; ANDROID_ABI, default arm64-v8a)
 #   android         the Android app, an APK (interpreter; ANDROID_NDK_HOME (r26+), ANDROID_HOME, JDK 17;
 #                   ANDROID_ABIS, default arm64-v8a; GRADLE, default android/gradlew)
+#   dos             the DOS front end, CRANKED.EXE with the HDPMI32 DPMI host (interpreter; DJGPP_PREFIX, default
+#                   ~/djgpp: the DJGPP cross compiler, GCC 13 or later; build-djgpp.sh builds one)
 #   appimage        a Linux AppImage of the desktop front end (builds desktop first; needs appimagetool)
 #   runner          the headless test runner
 # Results go to dist/<target>/. Build folders are build/<target>/. Environment: CONFIG (Release), JOBS, CMAKE_EXTRA.
@@ -26,11 +28,11 @@ TARGETS=()
 while [ $# -gt 0 ]; do
   case $1 in
     --sdk) SDK=$2; shift 2;;
-    -h|--help) sed -n '2,20p' "$0"; exit 0;;
+    -h|--help) sed -n '2,/^set -e$/{/^#/p}' "$0"; exit 0;;
     *) TARGETS+=("$1"); shift;;
   esac
 done
-[ ${#TARGETS[@]} -gt 0 ] || { sed -n '2,20p' "$0"; exit 1; }
+[ ${#TARGETS[@]} -gt 0 ] || { sed -n '2,/^set -e$/{/^#/p}' "$0"; exit 1; }
 
 JOBS=${JOBS:-$(nproc 2> /dev/null || sysctl -n hw.ncpu 2> /dev/null || echo 4)}
 GEN=(); command -v ninja > /dev/null && GEN=(-G Ninja)
@@ -107,6 +109,18 @@ emscripten_zlib() { # zlib for libzip, built with emcc from the copy Cranked bun
   cp "$CR/core/libs/zlib/zlib.h" "$CR/core/libs/zlib/zconf.h" "$out/include/"
 }
 
+djgpp_zlib() { # zlib for libzip, built with the DJGPP compiler from the copy Cranked bundles
+  local out=$ROOT/build/djgpp-zlib
+  [ -f "$out/libz.a" ] && return
+  mkdir -p "$out/include"
+  for f in adler32 compress crc32 deflate gzclose gzlib gzread gzwrite infback inffast inflate inftrees trees uncompr zutil; do
+    "$DJGPP_PREFIX/bin/i386-pc-msdosdjgpp-gcc" -O2 -march=i586 -DHAVE_UNISTD_H -DHAVE_STDARG_H -DEWOULDBLOCK=EAGAIN \
+      -c "$CR/core/libs/zlib/$f.c" -o "$out/$f.o"
+  done
+  "$DJGPP_PREFIX/bin/i386-pc-msdosdjgpp-ar" rcs "$out/libz.a" "$out"/*.o
+  cp "$CR/core/libs/zlib/zlib.h" "$CR/core/libs/zlib/zconf.h" "$out/include/"
+}
+
 for t in "${TARGETS[@]}"; do
   case $t in
     web)
@@ -162,6 +176,21 @@ for t in "${TARGETS[@]}"; do
       mkdir -p "$ROOT/dist/android"
       cp "$ROOT/android/app/build/outputs/apk/release/app-release.apk" "$ROOT/dist/android/Cranked-PoC.apk"
       echo "dist/android:"; ls "$ROOT/dist/android"
+      ;;
+    dos)
+      export DJGPP_PREFIX=${DJGPP_PREFIX:-$HOME/djgpp}
+      [ -x "$DJGPP_PREFIX/bin/i386-pc-msdosdjgpp-g++" ] ||
+        { echo "no DJGPP compiler in $DJGPP_PREFIX (DJGPP_PREFIX; scripts/build-djgpp.sh builds one)" >&2; exit 1; }
+      PATH=$DJGPP_PREFIX/bin:$PATH # for stubify, which the compiler runs when it links
+      djgpp_zlib
+      native dos cranked_dos -DCMAKE_TOOLCHAIN_FILE="$CR/cmake/djgpp.cmake" -DUSE_UNICORN=OFF -DUSE_INTERPRETER=ON \
+        -DUSE_SOCKETS=OFF -DUSE_CAPSTONE=OFF -DSKIP_DESKTOP=ON -DSKIP_LIBRETRO=ON \
+        -DZLIB_LIBRARY="$ROOT/build/djgpp-zlib/libz.a" -DZLIB_INCLUDE_DIR="$ROOT/build/djgpp-zlib/include"
+      "$ROOT/scripts/build-hdpmi.sh" "$ROOT/build/hdpmi" > /dev/null
+      mkdir -p "$ROOT/dist/dos"
+      "$DJGPP_PREFIX/bin/i386-pc-msdosdjgpp-strip" -o "$ROOT/dist/dos/CRANKED.EXE" "$ROOT/build/dos/dos/cranked.exe"
+      cp "$ROOT/build/hdpmi/HDPMI32.EXE" "$ROOT/packaging/dos/README.TXT" "$ROOT/packaging/dos/CRANK.BAT" "$ROOT/dist/dos/"
+      echo "dist/dos:"; ls "$ROOT/dist/dos"
       ;;
     appimage)
       [ -x "$ROOT/dist/desktop/cranked_desktop" ] || "$0" desktop

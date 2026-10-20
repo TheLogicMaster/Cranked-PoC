@@ -1,0 +1,26 @@
+diff --git a/gif.h b/gif.h
+index 1c614b4..e786e38 100644
+--- a/gif.h
++++ b/gif.h
+@@ -446,8 +446,8 @@ void GifDitherImage( const uint8_t* lastFrame, const uint8_t* nextFrame, uint8_t
+                 continue;
+             }
+ 
+-            int32_t bestDiff = 1000000;
+-            int32_t bestInd = kGifTransIndex;
++            int bestDiff = 1000000;
++            int bestInd = kGifTransIndex;
+ 
+             // Search the palete
+             GifGetClosestPaletteColor(pPal, rr, gg, bb, &bestInd, &bestDiff, 1);
+@@ -533,8 +533,8 @@ void GifThresholdImage( const uint8_t* lastFrame, const uint8_t* nextFrame, uint
+         else
+         {
+             // palettize the pixel
+-            int32_t bestDiff = 1000000;
+-            int32_t bestInd = 1;
++            int bestDiff = 1000000;
++            int bestInd = 1;
+             GifGetClosestPaletteColor(pPal, nextFrame[0], nextFrame[1], nextFrame[2], &bestInd, &bestDiff, 1);
+ 
+             // Write the resulting color to the output buffer

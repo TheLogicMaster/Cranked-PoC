@@ -23,7 +23,7 @@ your browser).
 - **Lua and C games**: C games run on Unicorn's JIT on the desktop, or on the built-in ARM interpreter where a JIT is
   not possible (the browser, iOS, consoles).
 - **Front ends**: a desktop app (Windows, macOS, Linux; also as an AppImage and a Flatpak) with a debugger, a libretro
-  core (RetroArch; an Android build is experimental), an Android app (experimental), and the browser build (installable, works offline, touch and gamepad controls).
+  core (RetroArch; an Android build is experimental), an Android app (experimental), a DOS build (experimental), and the browser build (installable, works offline, touch and gamepad controls).
 - **Much closer to the real thing**: hundreds of behaviours measured against the SDK 3.1.1 Simulator and fixed; see
   [Cranked APIs](https://github.com/TheLogicMaster/Cranked-APIs).
 
@@ -50,7 +50,8 @@ The games shown are [Singularity](https://github.com/Rani367/singularity) by Ran
 | `scripts/package-linux.sh` | AppImage and Flatpak of the desktop front end |
 | `scripts/docker-build.sh`, `docker/` | The same builds in Docker, with your SDK passed in |
 | `android/` | The Android app (Gradle project; the native library comes from `scripts/build.sh android`) |
-| `packaging/` | The Flatpak manifest, desktop entry, icon, the libretro core's RetroArch info file, and the optional download proxy (`download-proxy/`) |
+| `scripts/build-djgpp.sh`, `scripts/build-hdpmi.sh` | The DJGPP cross compiler and the HDPMI32 DPMI host for the DOS build |
+| `packaging/` | The DOS build's README and batch file (`dos/`), the Flatpak manifest, desktop entry, icon, the libretro core's RetroArch info file, and the optional download proxy (`download-proxy/`) |
 | `site/` | The hosted site's settings (`site.json`), the games it hosts (`games.tsv`) and the games it links to (`links.tsv`) |
 | `docs/screenshots/` | The pictures in this file |
 | `.github/workflows/` | Builds the targets on Linux, Windows and macOS, and publishes the web build to the `gh-pages` branch; it runs when started by hand (Actions > build > Run workflow), with a checkbox per target |
@@ -94,6 +95,7 @@ Targets:
 | `libretro-nojit` | A libretro core with the interpreter, for platforms that forbid JIT (iOS, consoles) |
 | `libretro-android` | The libretro core for Android (arm64 by default, interpreter; needs the Android NDK r26 or later) |
 | `android` | The Android app, `dist/android/Cranked-PoC.apk` (arm64 by default, interpreter; needs the Android NDK r26 or later and the SDK, and JDK 17; Gradle comes through `android/gradlew`; not in Docker) |
+| `dos` | The DOS front end, `dist/dos/CRANKED.EXE` with the HDPMI32 DPMI host (interpreter; needs DJGPP with GCC 13 or later in `DJGPP_PREFIX`, default `~/djgpp`, which `scripts/build-djgpp.sh` builds; not in Docker) |
 | `appimage` | A Linux AppImage of the desktop front end (needs appimagetool); written to `dist/packages/` |
 | `web` | The browser front end (Emscripten 3.1.52 or later; set `EMSDK` or put `emcc` on the PATH) |
 | `runner` | The headless test runner (prints a game's console output; used to compare against the Simulator) |
@@ -146,6 +148,23 @@ quit). Touch controls: a d-pad on the left, B and A on the right, the menu butto
 crank, a wheel on the right that turns with the finger (double-tap it to dock or undock the crank). Gamepads and
 keyboards map as on the desktop. C games run on the ARM interpreter, as in the libretro core for Android.
 
+## The DOS build
+
+`scripts/build.sh dos` builds `CRANKED.EXE`, a 32-bit protected mode DOS program (DJGPP), and puts it in `dist/dos/`
+with `HDPMI32.EXE` (the HX DOS extender's DPMI host, freeware, built from source by `scripts/build-hdpmi.sh`),
+`CRANK.BAT`, which starts the host and then Cranked, and a `README.TXT` for the user. The compiler is GCC 14.2 for
+DJGPP, which `scripts/build-djgpp.sh [folder]` builds with [jwt27/build-gcc](https://github.com/jwt27/build-gcc)
+(about half an hour; the prebuilt DJGPP releases are too old for `<format>`).
+
+It needs a Pentium or later and a VGA: the screen is shown at twice its size in the VESA 800x600 16-color mode, or
+at its own size in 640x480 (`-1`). A Sound Blaster 16 named by `BLASTER` plays the sound, and a mouse driver lets
+the mouse turn the crank. Keys are those of the desktop front end, plus P to pause, F5 to restart, F12 for a
+screenshot and Esc to quit. Games are opened from the command line (`CRANK game.zip`); a long file name driver
+(DOSLFN) is recommended, since save data go into folders named after bundle IDs. C games run on the ARM
+interpreter, so they need a fast machine (the SDK's Life example runs about 34 million ARM instructions a frame);
+Lua games are lighter. Tested in DOSBox-X; `CRANKED_LOG=<file>` writes the log and the game's console output to a
+file.
+
 ## Hosting the web build
 
 `dist/web` is a static site: serve it over HTTP (HTTPS for the offline and audio worklet features). It works in two
@@ -191,7 +210,9 @@ The changes are in `patches/`. In short:
 - hundreds of API behaviours measured against the Simulator and fixed (graphics, sprites, collisions, text, audio,
   files, JSON, the C API's calling conventions);
 - an ARM interpreter, so C games run without a JIT (in the browser, or where JIT is not allowed);
-- the browser front end, the libretro core and the desktop front end made usable.
+- the browser front end, the libretro core and the desktop front end made usable;
+- a DOS front end and the changes for building with DJGPP (where `int32_t` is `long`, and a few C99 math and
+  `<fenv.h>` functions are missing).
 
 The behaviours themselves, and the test programs behind them, are documented in Cranked APIs rather than here.
 

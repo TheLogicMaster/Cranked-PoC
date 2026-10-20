@@ -90,10 +90,10 @@ index 0000000..5f281c3
 +};
 diff --git a/core/ArmInterpreter.cpp b/core/ArmInterpreter.cpp
 new file mode 100644
-index 0000000..17483e7
+index 0000000..2a95d6b
 --- /dev/null
 +++ b/core/ArmInterpreter.cpp
-@@ -0,0 +1,1634 @@
+@@ -0,0 +1,1635 @@
 +// See ArmInterpreter.hpp. The decoding follows the ARMv7-M Architecture Reference Manual's encoding tables
 +// (Thumb 16-bit, Thumb 32-bit, floating point), with FPv5 additions.
 +#include "ArmInterpreter.hpp"
@@ -103,6 +103,7 @@ index 0000000..17483e7
 +#include <cfenv>
 +#include <cmath>
 +#include <limits>
++#include "DjgppCompat.hpp"
 +
 +// portable byte swap (MSVC has no __builtin_bswap32); compilers turn this into one instruction
 +static inline uint32_t byteSwap32(uint32_t v) { return (v >> 24) | ((v >> 8) & 0xFF00u) | ((v << 8) & 0xFF0000u) | (v << 24); }
@@ -5450,10 +5451,20 @@ index 8f03efc..223366f 100644
      };
  
 diff --git a/core/CMakeLists.txt b/core/CMakeLists.txt
-index 875f6d3..82a4901 100644
+index 875f6d3..f162a2b 100644
 --- a/core/CMakeLists.txt
 +++ b/core/CMakeLists.txt
-@@ -16,8 +16,15 @@ endif()
+@@ -5,6 +5,9 @@ project(core)
+ set(CMAKE_CXX_STANDARD 20)
+ set(CMAKE_CXX_STANDARD_REQUIRED ON)
+ set(CMAKE_CXX_EXTENSIONS OFF)
++if (DJGPP) # its headers declare POSIX types (off_t) only in GNU mode
++    set(CMAKE_CXX_EXTENSIONS ON)
++endif ()
+ 
+ if(CMAKE_TOOLCHAIN_FILE MATCHES "conan_toolchain.cmake")
+     message(STATUS "Using Conan toolchain")
+@@ -16,8 +19,15 @@ endif()
  
  include(${CMAKE_SOURCE_DIR}/cmake/get_cpm.cmake)
  
@@ -5471,7 +5482,7 @@ index 875f6d3..82a4901 100644
  
  find_package(ZLIB QUIET)
  find_package(unicorn QUIET)
-@@ -79,14 +86,27 @@ else ()
+@@ -79,20 +89,36 @@ else ()
      list(APPEND CRANKED_INCLUDES libs/zlib)
  endif ()
  
@@ -5501,7 +5512,16 @@ index 875f6d3..82a4901 100644
      set(ASIO_TAG "asio-1-38-2")
      add_subdirectory(libs/asio)
  endif ()
-@@ -117,12 +137,21 @@ if (MSVC)
+ 
+ if (TARGET Tracy::TracyClient)
+     list(APPEND CRANKED_LIBS Tracy::TracyClient)
++elseif (DJGPP AND NOT USE_TRACY)
++    # DOS has no threads, which Tracy's client library needs; with profiling off only its headers are used
++    list(APPEND CRANKED_INCLUDES libs/tracy/public)
+ else ()
+     add_subdirectory(libs/tracy)
+     list(APPEND CRANKED_LIBS TracyClient)
+@@ -117,12 +143,21 @@ if (MSVC)
      set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /MP /Zc:__cplusplus")
      list(APPEND CRANKED_LIBS ws2_32 wsock32)
      list(APPEND CRANKED_DEFINES _WIN32_WINNT=0x0A00)
@@ -5523,7 +5543,7 @@ index 875f6d3..82a4901 100644
  endforeach ()
  
  set(cranked_sources
-@@ -131,6 +160,7 @@ set(cranked_sources
+@@ -131,6 +166,7 @@ set(cranked_sources
          Cranked.cpp
          Debugger.cpp
          Files.cpp
@@ -5531,7 +5551,7 @@ index 875f6d3..82a4901 100644
          Graphics.cpp
          HeapAllocator.cpp
          LuaEngine.cpp
-@@ -143,17 +173,37 @@ set(cranked_sources
+@@ -143,17 +179,37 @@ set(cranked_sources
          Runtime.cpp
          Utils.cpp
          gen/PlaydateFunctionMappings.cpp
@@ -5570,7 +5590,7 @@ index 875f6d3..82a4901 100644
              DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/resources/${resource_file}
              COMMENT Processing '${resource_file}'
      )
-@@ -169,15 +219,39 @@ embed_resource("crank-frames-2x.pdt" "CrankFrames2X.hpp" "CRANK_FRAMES_2X" "" "R
+@@ -169,15 +225,39 @@ embed_resource("crank-frames-2x.pdt" "CrankFrames2X.hpp" "CRANK_FRAMES_2X" "" "R
  embed_resource("crank-frames-4x.pdt" "CrankFrames4X.hpp" "CRANK_FRAMES_4X" "" "Rom.cpp")
  embed_resource("crank-frames-8x.pdt" "CrankFrames8X.hpp" "CRANK_FRAMES_8X" "" "Rom.cpp")
  embed_resource("crank-notice-bubble.pdi" "CrankNoticeBubble.hpp" "CRANK_NOTICE_BUBBLE" "" "Rom.cpp")
@@ -5647,7 +5667,7 @@ index b059810..701fa68 100644
  
  }
 diff --git a/core/Cranked.cpp b/core/Cranked.cpp
-index abdad41..9f4f15e 100644
+index abdad41..734a82a 100644
 --- a/core/Cranked.cpp
 +++ b/core/Cranked.cpp
 @@ -1,6 +1,7 @@
@@ -5702,7 +5722,7 @@ index abdad41..9f4f15e 100644
 +
 +bool Cranked::pastRunawayDeadline() const { // see runawaySeconds
 +    if (runawaySeconds <= 0 or runawayStart.time_since_epoch().count() == 0 or const_cast<Debugger &>(debugger).isEnabled()) return false;
-+    return chrono::steady_clock::now() - runawayStart > chrono::duration<double>(runawaySeconds);
++    return hostSteadyNow() - runawayStart > chrono::duration<double>(runawaySeconds);
 +}
 +
  void Cranked::update() {
@@ -5843,7 +5863,7 @@ index abdad41..9f4f15e 100644
          init();
  }
 diff --git a/core/Cranked.hpp b/core/Cranked.hpp
-index 271f325..e68666c 100644
+index 271f325..87fbb2d 100644
 --- a/core/Cranked.hpp
 +++ b/core/Cranked.hpp
 @@ -1,5 +1,7 @@
@@ -5869,7 +5889,7 @@ index 271f325..e68666c 100644
 +            virtualClock = true;
 +            virtualMicros = 0;
 +            virtualSystemBase = chrono::system_clock::now();
-+            virtualSteadyBase = chrono::steady_clock::now();
++            virtualSteadyBase = hostSteadyNow();
 +        }
 +        void advanceVirtualClock(int64 micros) { if (micros > 0) virtualMicros += micros; }
 +        // with the virtual clock, time stands still within a frame, so a game waiting for time to pass
@@ -5883,7 +5903,7 @@ index 271f325..e68666c 100644
 +            return virtualSystemBase + chrono::duration_cast<chrono::system_clock::duration>(chrono::microseconds(virtualMicros));
 +        }
 +        [[nodiscard]] chrono::steady_clock::time_point steadyNow() const {
-+            if (!virtualClock) return chrono::steady_clock::now();
++            if (!virtualClock) return hostSteadyNow();
 +            return virtualSteadyBase + chrono::duration_cast<chrono::steady_clock::duration>(chrono::microseconds(virtualMicros));
 +        }
 +
@@ -5969,7 +5989,7 @@ index 271f325..e68666c 100644
 +        bool pastRunawayDeadline() const;
 +        struct RunawayScope { // marks the outermost call into game code
 +            Cranked &c; bool outer;
-+            explicit RunawayScope(Cranked &c) : c(c), outer(c.runawayStart.time_since_epoch().count() == 0) { if (outer) c.runawayStart = chrono::steady_clock::now(); }
++            explicit RunawayScope(Cranked &c) : c(c), outer(c.runawayStart.time_since_epoch().count() == 0) { if (outer) c.runawayStart = hostSteadyNow(); }
 +            ~RunawayScope() { if (outer) c.runawayStart = {}; }
 +        };
  
@@ -6169,6 +6189,68 @@ index 306cce7..a197ee3 100644
          array<char, MESSAGE_MAX_LENGTH> tcpReceiveBuffer{};
          string packetDecodeBuffer;
          queue<string> tcpTransmitBuffers;
+diff --git a/core/DjgppCompat.hpp b/core/DjgppCompat.hpp
+new file mode 100644
+index 0000000..1be4e7f
+--- /dev/null
++++ b/core/DjgppCompat.hpp
+@@ -0,0 +1,56 @@
++#pragma once
++
++// DJGPP (32-bit DOS): its C library lacks a few C99 functions (fma, fmaf, nearbyint) and <fenv.h>, so libstdc++
++// leaves all the C99 math functions out of namespace std. This fills in the ones Cranked uses: std overloads that
++// forward to the C library where it has the function, fused multiply-adds in wider precision (exact for float,
++// close for double), and the rounding-mode functions on the x87 control word.
++
++#ifdef __DJGPP__
++
++#include <math.h>
++
++inline float fmaf(float x, float y, float z) { return (float) ((double) x * y + z); } // the product is exact in double
++inline double fma(double x, double y, double z) { return (double) ((long double) x * y + z); }
++inline double nearbyint(double x) { return rint(x); } // in the current rounding mode, as nearbyint
++inline float nearbyintf(float x) { return rintf(x); }
++inline float exp2f(float x) { return (float) exp2(x); }
++
++namespace std {
++    inline double log2(double x) { return ::log2(x); }
++    inline float log2(float x) { return ::log2f(x); }
++    inline double round(double x) { return ::round(x); }
++    inline float round(float x) { return ::roundf(x); }
++    inline double trunc(double x) { return ::trunc(x); }
++    inline float trunc(float x) { return ::truncf(x); }
++    inline double nearbyint(double x) { return ::nearbyint(x); }
++    inline float nearbyint(float x) { return ::nearbyintf(x); }
++    inline double fma(double x, double y, double z) { return ::fma(x, y, z); }
++    inline float fma(float x, float y, float z) { return ::fmaf(x, y, z); }
++    // integer arguments, as the standard overloads accept
++    template<typename T> requires std::is_integral_v<T> double log2(T x) { return ::log2((double) x); }
++    template<typename T> requires std::is_integral_v<T> double round(T x) { return (double) x; }
++    template<typename T> requires std::is_integral_v<T> double trunc(T x) { return (double) x; }
++}
++
++// rounding modes, as the x87 control word's rounding control field (bits 10 and 11)
++#ifndef FE_TONEAREST
++#define FE_TONEAREST 0x000
++#define FE_DOWNWARD 0x400
++#define FE_UPWARD 0x800
++#define FE_TOWARDZERO 0xC00
++inline int fegetround() {
++    unsigned short cw;
++    __asm__ __volatile__("fnstcw %0" : "=m"(cw));
++    return cw & 0xC00;
++}
++inline int fesetround(int mode) {
++    if (mode & ~0xC00) return 1;
++    unsigned short cw;
++    __asm__ __volatile__("fnstcw %0" : "=m"(cw));
++    cw = (unsigned short) ((cw & ~0xC00) | mode);
++    __asm__ __volatile__("fldcw %0" : : "m"(cw));
++    return 0;
++}
++#endif
++
++#endif
 diff --git a/core/Files.cpp b/core/Files.cpp
 index c6ba0f7..324c72a 100644
 --- a/core/Files.cpp
@@ -11629,7 +11711,7 @@ index 0000000..0284338
 +
 +}  // namespace jsondecoder
 diff --git a/core/LuaEngine.cpp b/core/LuaEngine.cpp
-index 12bbbfe..2dc29e8 100644
+index 12bbbfe..92c968b 100644
 --- a/core/LuaEngine.cpp
 +++ b/core/LuaEngine.cpp
 @@ -3,6 +3,7 @@
@@ -11840,8 +11922,8 @@ index 12bbbfe..2dc29e8 100644
 +        double budget = minimumGCTimeMs;
 +        if (used > gcScalingMin and gcScalingMax > gcScalingMin) // scaled up toward a full collection
 +            budget += (used - gcScalingMin) / (gcScalingMax - gcScalingMin) * 10.0;
-+        auto start = chrono::steady_clock::now();
-+        while (chrono::duration<double, std::milli>(chrono::steady_clock::now() - start).count() < budget)
++        auto start = hostSteadyNow();
++        while (chrono::duration<double, std::milli>(hostSteadyNow() - start).count() < budget)
 +            if (lua_gc(luaInterpreter, LUA_GCSTEP, 0)) break; // a cycle finished
 +    }
  }
@@ -17439,7 +17521,7 @@ index be15627..dedc3ff 100644
          item->options.emplace_back(option, cranked.heap.allocator<char>());
      item->value = value;
 diff --git a/core/NativeEngine.cpp b/core/NativeEngine.cpp
-index 866c7a9..35757ee 100644
+index 866c7a9..2b78bcc 100644
 --- a/core/NativeEngine.cpp
 +++ b/core/NativeEngine.cpp
 @@ -1,9 +1,10 @@
@@ -17488,7 +17570,7 @@ index 866c7a9..35757ee 100644
 +        int64_t start = sliceStartNanos;
 +        if (!start) continue;
 +        uint64_t generation = sliceGeneration;
-+        int64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
++        int64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(hostSteadyNow().time_since_epoch()).count();
 +        if (now - start > 15000000 and sliceStartNanos == start and sliceGeneration == generation)
 +            uc_emu_stop(nativeEngine); // a stop that lands just after the slice ended only ends the next slice early
 +    }
@@ -17682,7 +17764,7 @@ index 866c7a9..35757ee 100644
          // Pass null for lua context param since it isn't used, with `setSpriteDrawFunction` being a lie and no linkage existing for C Lua functions, anyway
          result = cranked->nativeEngine.invokeEmulatedFunction<int32, ArgType::int32_t, ArgType::uint32_t>(cranked->nativeEngine.emulatedLuaFunctions[index], 0);
 diff --git a/core/NativeEngine.hpp b/core/NativeEngine.hpp
-index f09aa86..b86cd71 100644
+index f09aa86..13f93a1 100644
 --- a/core/NativeEngine.hpp
 +++ b/core/NativeEngine.hpp
 @@ -6,6 +6,12 @@
@@ -17853,7 +17935,7 @@ index f09aa86..b86cd71 100644
 +                    if (shouldAbort())
 +                        throw NativeExecutionError("emulation stopped: the game's native code did not return", dumpCore());
 +                    sliceGeneration++;
-+                    sliceStartNanos = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
++                    sliceStartNanos = std::chrono::duration_cast<std::chrono::nanoseconds>(hostSteadyNow().time_since_epoch()).count();
 +                    auto result = uc_emu_start(nativeEngine, pc | 0x1, returnAddress & ~0x1, 0, shouldStep ? 1 : 0);
 +                    sliceStartNanos = 0;
                      pc = readRegister(UC_ARM_REG_PC);
@@ -19390,7 +19472,7 @@ index 0314ac2..c3eeadb 100644
          static pair<string, File> makeSystemFilePair(string path, FileType type, const uint8 *data, size_t size) {
              path = fs::path(normalizePath(path)).replace_extension().string();
 diff --git a/core/Runtime.cpp b/core/Runtime.cpp
-index e6f8222..2c5fdb1 100644
+index e6f8222..9e15b2e 100644
 --- a/core/Runtime.cpp
 +++ b/core/Runtime.cpp
 @@ -1,3 +1,5 @@
@@ -19797,8 +19879,9 @@ index e6f8222..2c5fdb1 100644
 +    ctx.clipRect = savedClip;
  }
  
- int32_t cranked::playdate_graphics_getTextHeightForMaxWidth(Cranked *cranked, Font font, void *text, uint32 len, int32 maxwidth, int32 encoding, int32 wrap, int32 tracking, int32 extraLeading) {
+-int32_t cranked::playdate_graphics_getTextHeightForMaxWidth(Cranked *cranked, Font font, void *text, uint32 len, int32 maxwidth, int32 encoding, int32 wrap, int32 tracking, int32 extraLeading) {
 -    return font->glyphHeight; // Todo
++int32 cranked::playdate_graphics_getTextHeightForMaxWidth(Cranked *cranked, Font font, void *text, uint32 len, int32 maxwidth, int32 encoding, int32 wrap, int32 tracking, int32 extraLeading) {
 +    // NULL means the current font; measure the wrapped text instead of returning one line's height
 +    auto &api = cranked->graphics.api();
 +    // the arguments' tracking and leading, as getTextWidth (assumed, not measured)
@@ -19873,9 +19956,10 @@ index e6f8222..2c5fdb1 100644
 +        tilemap->tiles[i] = index == 0xFFFF ? -1 : index;
  }
  
- int32_t cranked::playdate_tilemap_getTileAtPosition(Cranked *cranked, TileMap tilemap, int32 x, int32 y) {
+-int32_t cranked::playdate_tilemap_getTileAtPosition(Cranked *cranked, TileMap tilemap, int32 x, int32 y) {
 -    int i = (y - 1) * tilemap->width + x - 1;
 -    return i < tilemap->tiles.size() ? tilemap->tiles[i] : -1;
++int32 cranked::playdate_tilemap_getTileAtPosition(Cranked *cranked, TileMap tilemap, int32 x, int32 y) {
 +    int64 i = (int64) y * tilemap->width + x; // C coordinates are 0-based (64-bit: no overflow)
 +    if (!(x >= 0 and y >= 0 and x < tilemap->width and i < (int64) tilemap->tiles.size()))
 +        return -1;
@@ -19903,7 +19987,7 @@ index e6f8222..2c5fdb1 100644
  }
  
  void cranked::playdate_videostream_setFile(Cranked *cranked, StreamPlayer player, File file) {
-@@ -491,11 +619,11 @@ void cranked::playdate_videostream_setHTTPConnection(Cranked *cranked, StreamPla
+@@ -491,22 +619,22 @@ void cranked::playdate_videostream_setHTTPConnection(Cranked *cranked, StreamPla
  }
  
  FilePlayer cranked::playdate_videostream_getFilePlayer(Cranked *cranked, StreamPlayer player) {
@@ -19917,6 +20001,19 @@ index e6f8222..2c5fdb1 100644
  }
  
  uint8 cranked::playdate_videostream_update(Cranked *cranked, StreamPlayer player) {
+     return 0; // Todo
+ }
+ 
+-int32_t cranked::playdate_videostream_getBufferedFrameCount(Cranked *cranked, StreamPlayer player) {
++int32 cranked::playdate_videostream_getBufferedFrameCount(Cranked *cranked, StreamPlayer player) {
+     return 0; // Todo
+ }
+ 
+-uint32_t cranked::playdate_videostream_getBytesRead(Cranked *cranked, StreamPlayer player) {
++uint32 cranked::playdate_videostream_getBytesRead(Cranked *cranked, StreamPlayer player) {
+     return 0; // Todo
+ }
+ 
 @@ -515,11 +643,21 @@ void cranked::playdate_videostream_setTCPConnection(Cranked *cranked, StreamPlay
  }
  
@@ -23057,16 +23154,18 @@ index e6f8222..2c5fdb1 100644
 +    return source;
  }
  
- int32_t cranked::playdate_sound_channel_addEffect(Cranked *cranked, SoundChannel channel, SoundEffect effectDerived) {
+-int32_t cranked::playdate_sound_channel_addEffect(Cranked *cranked, SoundChannel channel, SoundEffect effectDerived) {
 -    return channel->effects.emplace(cranked->audio.effectFromDerived(effectDerived)).second;
++int32 cranked::playdate_sound_channel_addEffect(Cranked *cranked, SoundChannel channel, SoundEffect effectDerived) {
 +    auto effect = cranked->audio.effectFromDerived(effectDerived);
 +    bool added = channel->effects.emplace(effect).second;
 +    if (added) channel->effectOrder.push_back(effect);
 +    return added;
  }
  
- int32_t cranked::playdate_sound_channel_removeEffect(Cranked *cranked, SoundChannel channel, SoundEffect effectDerived) {
+-int32_t cranked::playdate_sound_channel_removeEffect(Cranked *cranked, SoundChannel channel, SoundEffect effectDerived) {
 -    return eraseByEquivalentKey(channel->effects, cranked->audio.effectFromDerived(effectDerived));
++int32 cranked::playdate_sound_channel_removeEffect(Cranked *cranked, SoundChannel channel, SoundEffect effectDerived) {
 +    auto effect = cranked->audio.effectFromDerived(effectDerived);
 +    erase(channel->effectOrder, effect);
 +    return eraseByEquivalentKey(channel->effects, effect);
@@ -23283,7 +23382,13 @@ index e6f8222..2c5fdb1 100644
      conn->openCallback = callback;
      conn->openUserdata = userdata;
      return (int)conn->open();
-@@ -3576,7 +4477,7 @@ uint32_t cranked::playdate_tcp_getSentBytesPending(Cranked *cranked, TCPConnecti
+@@ -3571,12 +4472,12 @@ int32 cranked::playdate_tcp_write(Cranked *cranked, TcpConnection conn, void *bu
+     return (int32)conn->send({ (const uint8 *)buffer, length });
+ }
+ 
+-uint32_t cranked::playdate_tcp_getSentBytesPending(Cranked *cranked, TCPConnection_32 *conn) {
++uint32 cranked::playdate_tcp_getSentBytesPending(Cranked *cranked, TCPConnection_32 *conn) {
+     return 0; // Todo
  }
  
  int32 cranked::playdate_network_getStatus(Cranked *cranked) {
@@ -23689,7 +23794,7 @@ index 318f0f1..60cd471 100644
      return false;
  }
 diff --git a/core/Utils.hpp b/core/Utils.hpp
-index 467f2c9..7455a00 100644
+index 467f2c9..4617ef0 100644
 --- a/core/Utils.hpp
 +++ b/core/Utils.hpp
 @@ -4,12 +4,14 @@
@@ -23709,7 +23814,23 @@ index 467f2c9..7455a00 100644
  #include "lua.h"
  #include "lualib.h"
  #include "lauxlib.h"
-@@ -99,7 +101,9 @@ namespace cranked {
+@@ -36,6 +38,7 @@
+ #include <sstream>
+ #include <bit>
+ #include <chrono>
++#include <ctime> // uclock (DJGPP)
+ #include <functional>
+ #include <queue>
+ #include <stdexcept>
+@@ -64,6 +67,7 @@
+ #include <algorithm>
+ #include <locale>
+ #include <span>
++#include "DjgppCompat.hpp"
+ 
+ namespace cranked {
+ 
+@@ -99,12 +103,17 @@ namespace cranked {
      namespace this_thread = std::this_thread;
      namespace numbers = std::numbers;
      namespace ranges = std::ranges;
@@ -23719,7 +23840,17 @@ index 467f2c9..7455a00 100644
  
      typedef int64_t int64;
      typedef uint64_t uint64;
-@@ -178,7 +182,7 @@ namespace cranked {
+-    typedef int32_t int32;
+-    typedef uint32_t uint32;
++    // int, not int32_t: they are the same type except under DJGPP, where int32_t is long and mixing it with int
++    // literals in min/max would not compile
++    static_assert(sizeof(int) == 4);
++    typedef int int32;
++    typedef unsigned int uint32;
+     typedef int16_t int16;
+     typedef uint16_t uint16;
+     typedef int8_t int8;
+@@ -178,7 +187,7 @@ namespace cranked {
      }
  
      inline bool stringLowerEqual(string_view lhs, string_view rhs) {
@@ -23728,8 +23859,22 @@ index 467f2c9..7455a00 100644
      }
  
      class Version {
-@@ -231,7 +235,7 @@ namespace cranked {
+@@ -229,9 +238,21 @@ namespace cranked {
  
+     inline static Version VERSION_2_4_1{"2.4.1"};
+ 
++    // The host's steady clock, for timeouts and the runaway guard, which read it often. Under DJGPP the standard one
++    // asks DOS for the time (about 100 us an emulated call, and 55 ms steps); uclock() reads the timer chip.
++    inline chrono::steady_clock::time_point hostSteadyNow() {
++#ifdef __DJGPP__
++        static_assert(UCLOCKS_PER_SEC == 1193180);
++        using Ticks = chrono::duration<long long, std::ratio<1, 1193180>>;
++        return chrono::steady_clock::time_point(chrono::duration_cast<chrono::steady_clock::duration>(Ticks(uclock())));
++#else
++        return chrono::steady_clock::now();
++#endif
++    }
++
      template<typename TP>
      time_t to_time_t(TP tp) {
 -#if __ANDROID__
@@ -23737,7 +23882,7 @@ index 467f2c9..7455a00 100644
          return chrono::system_clock::to_time_t(chrono::time_point_cast<chrono::system_clock::duration>(tp - TP::clock::now() + chrono::system_clock::now()));
  #else
          return chrono::system_clock::to_time_t(chrono::clock_cast<chrono::system_clock>(tp));
-@@ -273,6 +277,8 @@ namespace cranked {
+@@ -273,6 +294,8 @@ namespace cranked {
      inline string normalizePath(string path) {
          path = regex_replace(path, regex("\\.\\."), ""); // Prevent directory traversal
          replace(path.begin(), path.end(), '\\', '/'); // Unix separators
@@ -23746,7 +23891,7 @@ index 467f2c9..7455a00 100644
          if (path.starts_with('/')) // Never start with a slash
              path = path.substr(1);
          if (path.ends_with('/')) // Always end without a slash
-@@ -478,6 +484,10 @@ namespace cranked {
+@@ -478,6 +501,10 @@ namespace cranked {
  
          bool dereference();
  
@@ -25352,135 +25497,708 @@ index cef4a96..eae9ca8 100644
 +	"end\n"
  	"";
 diff --git a/core/gen/PlaydateAPI.hpp b/core/gen/PlaydateAPI.hpp
-index ffa4936..7858603 100644
+index ffa4936..4c8a9aa 100644
 --- a/core/gen/PlaydateAPI.hpp
 +++ b/core/gen/PlaydateAPI.hpp
-@@ -930,7 +930,7 @@ int32_t playdate_sys_getLanguage(Cranked *cranked);
- uint32_t playdate_sys_getCurrentTimeMilliseconds(Cranked *cranked);
- uint32_t playdate_sys_getSecondsSinceEpoch(Cranked *cranked, uint32_t * milliseconds);
- void playdate_sys_drawFPS(Cranked *cranked, int32_t x, int32_t y);
+@@ -18,10 +18,10 @@ extern NativeFunctionMetadata playdateFunctionTable[FUNCTION_TABLE_SIZE];
+ int populatePlaydateApiStruct(void *api, Version version);
+ 
+ struct LCDRect_32 {
+-	int32_t left;
+-	int32_t right;
+-	int32_t top;
+-	int32_t bottom;
++	int32 left;
++	int32 right;
++	int32 top;
++	int32 bottom;
+ };
+ 
+ struct playdate_video_32 {
+@@ -148,9 +148,9 @@ struct PDDateTime_32 {
+ };
+ 
+ struct PDInfo_32 {
+-	uint32_t osversion;
+-	int32_t language;
+-	uint32_t pdxversion;
++	uint32 osversion;
++	int32 language;
++	uint32 pdxversion;
+ };
+ 
+ struct playdate_sys_32 {
+@@ -217,9 +217,9 @@ struct lua_reg_32 {
+ 
+ struct lua_val_32 {
+ 	cref_t name;
+-	int32_t type;
++	int32 type;
+ 	union {
+-		uint32_t intval;
++		uint32 intval;
+ 		float floatval;
+ 		cref_t strval;
+ 	} v;
+@@ -263,7 +263,7 @@ struct playdate_lua_32 {
+ struct json_value_32 {
+ 	uint8_t type;
+ 	union {
+-		int32_t intval;
++		int32 intval;
+ 		float floatval;
+ 		cref_t stringval;
+ 		cref_t arrayval;
+@@ -280,7 +280,7 @@ struct json_decoder_32 {
+ 	cref_t didDecodeArrayValue;
+ 	cref_t didDecodeSublist;
+ 	cref_t userdata;
+-	int32_t returnString;
++	int32 returnString;
+ 	cref_t path;
+ };
+ 
+@@ -292,10 +292,10 @@ struct json_reader_32 {
+ struct json_encoder_32 {
+ 	cref_t writeStringFunc;
+ 	cref_t userdata;
+-	int32_t pretty : 1;
+-	int32_t startedTable : 1;
+-	int32_t startedArray : 1;
+-	int32_t depth : 29;
++	int32 pretty : 1;
++	int32 startedTable : 1;
++	int32 startedArray : 1;
++	int32 depth : 29;
+ 	cref_t startArray;
+ 	cref_t addArrayMember;
+ 	cref_t endArray;
+@@ -317,14 +317,14 @@ struct playdate_json_32 {
+ };
+ 
+ struct FileStat_32 {
+-	int32_t isdir;
+-	uint32_t size;
+-	int32_t m_year;
+-	int32_t m_month;
+-	int32_t m_day;
+-	int32_t m_hour;
+-	int32_t m_minute;
+-	int32_t m_second;
++	int32 isdir;
++	uint32 size;
++	int32 m_year;
++	int32 m_month;
++	int32 m_day;
++	int32 m_hour;
++	int32 m_minute;
++	int32 m_second;
+ };
+ 
+ struct playdate_file_32 {
+@@ -356,8 +356,8 @@ struct CollisionPoint_32 {
+ };
+ 
+ struct CollisionVector_32 {
+-	int32_t x;
+-	int32_t y;
++	int32 x;
++	int32 y;
+ };
+ 
+ struct SpriteCollisionInfo_32 {
+@@ -810,24 +810,24 @@ struct playdate_display_32 {
+ };
+ 
+ struct PDScore_32 {
+-	uint32_t rank;
+-	uint32_t value;
++	uint32 rank;
++	uint32 value;
+ 	cref_t player;
+ 	cref_t boardID;
+ };
+ 
+ struct PDListScore_32 {
+-	uint32_t rank;
+-	uint32_t value;
++	uint32 rank;
++	uint32 value;
+ 	cref_t player;
+ };
+ 
+ struct PDScoresList_32 {
+ 	cref_t boardID;
+-	uint32_t count;
+-	uint32_t lastUpdated;
+-	int32_t playerIncluded;
+-	uint32_t limit;
++	uint32 count;
++	uint32 lastUpdated;
++	int32 playerIncluded;
++	uint32 limit;
+ 	cref_t scores;
+ };
+ 
+@@ -837,8 +837,8 @@ struct PDBoard_32 {
+ };
+ 
+ struct PDBoardsList_32 {
+-	uint32_t count;
+-	uint32_t lastUpdated;
++	uint32 count;
++	uint32 lastUpdated;
+ 	cref_t boards;
+ };
+ 
+@@ -918,175 +918,175 @@ struct playdate_network_32 {
+ 	cref_t tcp;
+ 	cref_t getStatus;
+ 	cref_t setEnabled;
+-	uint32_t reserved;
++	uint32 reserved;
+ };
+ 
+ 
+-void * playdate_sys_realloc(Cranked *cranked, void * ptr, uint32_t size);
+-int32_t playdate_sys_formatString(Cranked *cranked, cref_t * ret, uint8_t * fmt, ... );
++void * playdate_sys_realloc(Cranked *cranked, void * ptr, uint32 size);
++int32 playdate_sys_formatString(Cranked *cranked, cref_t * ret, uint8_t * fmt, ... );
+ void playdate_sys_logToConsole(Cranked *cranked, uint8_t * fmt, ... );
+ void playdate_sys_error(Cranked *cranked, uint8_t * fmt, ... );
+-int32_t playdate_sys_getLanguage(Cranked *cranked);
+-uint32_t playdate_sys_getCurrentTimeMilliseconds(Cranked *cranked);
+-uint32_t playdate_sys_getSecondsSinceEpoch(Cranked *cranked, uint32_t * milliseconds);
+-void playdate_sys_drawFPS(Cranked *cranked, int32_t x, int32_t y);
 -void playdate_sys_setUpdateCallback(Cranked *cranked, cref_t update, void * userdata);
+-void playdate_sys_getButtonState(Cranked *cranked, int32_t * current, int32_t * pushed, int32_t * released);
+-void playdate_sys_setPeripheralsEnabled(Cranked *cranked, int32_t mask);
++int32 playdate_sys_getLanguage(Cranked *cranked);
++uint32 playdate_sys_getCurrentTimeMilliseconds(Cranked *cranked);
++uint32 playdate_sys_getSecondsSinceEpoch(Cranked *cranked, uint32 * milliseconds);
++void playdate_sys_drawFPS(Cranked *cranked, int32 x, int32 y);
 +void playdate_sys_setUpdateCallback(Cranked *cranked, cref_t update, cref_t userdata);
- void playdate_sys_getButtonState(Cranked *cranked, int32_t * current, int32_t * pushed, int32_t * released);
- void playdate_sys_setPeripheralsEnabled(Cranked *cranked, int32_t mask);
++void playdate_sys_getButtonState(Cranked *cranked, int32 * current, int32 * pushed, int32 * released);
++void playdate_sys_setPeripheralsEnabled(Cranked *cranked, int32 mask);
  void playdate_sys_getAccelerometer(Cranked *cranked, float * outx, float * outy, float * outz);
-@@ -941,17 +941,17 @@ int32_t playdate_sys_setCrankSoundsDisabled(Cranked *cranked, int32_t flag);
- int32_t playdate_sys_getFlipped(Cranked *cranked);
- void playdate_sys_setAutoLockDisabled(Cranked *cranked, int32_t disable);
- void playdate_sys_setMenuImage(Cranked *cranked, LCDBitmap_32 * bitmap, int32_t xOffset);
+ float playdate_sys_getCrankChange(Cranked *cranked);
+ float playdate_sys_getCrankAngle(Cranked *cranked);
+-int32_t playdate_sys_isCrankDocked(Cranked *cranked);
+-int32_t playdate_sys_setCrankSoundsDisabled(Cranked *cranked, int32_t flag);
+-int32_t playdate_sys_getFlipped(Cranked *cranked);
+-void playdate_sys_setAutoLockDisabled(Cranked *cranked, int32_t disable);
+-void playdate_sys_setMenuImage(Cranked *cranked, LCDBitmap_32 * bitmap, int32_t xOffset);
 -PDMenuItem_32 * playdate_sys_addMenuItem(Cranked *cranked, uint8_t * title, cref_t callback, void * userdata);
 -PDMenuItem_32 * playdate_sys_addCheckmarkMenuItem(Cranked *cranked, uint8_t * title, int32_t value, cref_t callback, void * userdata);
 -PDMenuItem_32 * playdate_sys_addOptionsMenuItem(Cranked *cranked, uint8_t * title, cref_t * optionTitles, int32_t optionsCount, cref_t f, void * userdata);
++int32 playdate_sys_isCrankDocked(Cranked *cranked);
++int32 playdate_sys_setCrankSoundsDisabled(Cranked *cranked, int32 flag);
++int32 playdate_sys_getFlipped(Cranked *cranked);
++void playdate_sys_setAutoLockDisabled(Cranked *cranked, int32 disable);
++void playdate_sys_setMenuImage(Cranked *cranked, LCDBitmap_32 * bitmap, int32 xOffset);
 +PDMenuItem_32 * playdate_sys_addMenuItem(Cranked *cranked, uint8_t * title, cref_t callback, cref_t userdata);
-+PDMenuItem_32 * playdate_sys_addCheckmarkMenuItem(Cranked *cranked, uint8_t * title, int32_t value, cref_t callback, cref_t userdata);
-+PDMenuItem_32 * playdate_sys_addOptionsMenuItem(Cranked *cranked, uint8_t * title, cref_t * optionTitles, int32_t optionsCount, cref_t f, cref_t userdata);
++PDMenuItem_32 * playdate_sys_addCheckmarkMenuItem(Cranked *cranked, uint8_t * title, int32 value, cref_t callback, cref_t userdata);
++PDMenuItem_32 * playdate_sys_addOptionsMenuItem(Cranked *cranked, uint8_t * title, cref_t * optionTitles, int32 optionsCount, cref_t f, cref_t userdata);
  void playdate_sys_removeAllMenuItems(Cranked *cranked);
  void playdate_sys_removeMenuItem(Cranked *cranked, PDMenuItem_32 * menuItem);
- int32_t playdate_sys_getMenuItemValue(Cranked *cranked, PDMenuItem_32 * menuItem);
- void playdate_sys_setMenuItemValue(Cranked *cranked, PDMenuItem_32 * menuItem, int32_t value);
+-int32_t playdate_sys_getMenuItemValue(Cranked *cranked, PDMenuItem_32 * menuItem);
+-void playdate_sys_setMenuItemValue(Cranked *cranked, PDMenuItem_32 * menuItem, int32_t value);
++int32 playdate_sys_getMenuItemValue(Cranked *cranked, PDMenuItem_32 * menuItem);
++void playdate_sys_setMenuItemValue(Cranked *cranked, PDMenuItem_32 * menuItem, int32 value);
  uint8_t * playdate_sys_getMenuItemTitle(Cranked *cranked, PDMenuItem_32 * menuItem);
  void playdate_sys_setMenuItemTitle(Cranked *cranked, PDMenuItem_32 * menuItem, uint8_t * title);
 -void * playdate_sys_getMenuItemUserdata(Cranked *cranked, PDMenuItem_32 * menuItem);
 -void playdate_sys_setMenuItemUserdata(Cranked *cranked, PDMenuItem_32 * menuItem, void * ud);
+-int32_t playdate_sys_getReduceFlashing(Cranked *cranked);
 +cref_t playdate_sys_getMenuItemUserdata(Cranked *cranked, PDMenuItem_32 * menuItem);
 +void playdate_sys_setMenuItemUserdata(Cranked *cranked, PDMenuItem_32 * menuItem, cref_t ud);
- int32_t playdate_sys_getReduceFlashing(Cranked *cranked);
++int32 playdate_sys_getReduceFlashing(Cranked *cranked);
  float playdate_sys_getElapsedTime(Cranked *cranked);
  void playdate_sys_resetElapsedTime(Cranked *cranked);
-@@ -962,7 +962,7 @@ int32_t playdate_sys_shouldDisplay24HourTime(Cranked *cranked);
- void playdate_sys_convertEpochToDateTime(Cranked *cranked, uint32_t epoch, PDDateTime_32 * datetime);
- uint32_t playdate_sys_convertDateTimeToEpoch(Cranked *cranked, PDDateTime_32 * datetime);
+ float playdate_sys_getBatteryPercentage(Cranked *cranked);
+ float playdate_sys_getBatteryVoltage(Cranked *cranked);
+-int32_t playdate_sys_getTimezoneOffset(Cranked *cranked);
+-int32_t playdate_sys_shouldDisplay24HourTime(Cranked *cranked);
+-void playdate_sys_convertEpochToDateTime(Cranked *cranked, uint32_t epoch, PDDateTime_32 * datetime);
+-uint32_t playdate_sys_convertDateTimeToEpoch(Cranked *cranked, PDDateTime_32 * datetime);
++int32 playdate_sys_getTimezoneOffset(Cranked *cranked);
++int32 playdate_sys_shouldDisplay24HourTime(Cranked *cranked);
++void playdate_sys_convertEpochToDateTime(Cranked *cranked, uint32 epoch, PDDateTime_32 * datetime);
++uint32 playdate_sys_convertDateTimeToEpoch(Cranked *cranked, PDDateTime_32 * datetime);
  void playdate_sys_clearICache(Cranked *cranked);
 -void playdate_sys_setButtonCallback(Cranked *cranked, cref_t cb, void * buttonud, int32_t queuesize);
-+void playdate_sys_setButtonCallback(Cranked *cranked, cref_t cb, cref_t buttonud, int32_t queuesize);
++void playdate_sys_setButtonCallback(Cranked *cranked, cref_t cb, cref_t buttonud, int32 queuesize);
  void playdate_sys_setSerialMessageCallback(Cranked *cranked, cref_t callback);
- int32_t playdate_sys_vaFormatString(Cranked *cranked, cref_t * outstr, uint8_t * fmt, ... );
- int32_t playdate_sys_parseString(Cranked *cranked, uint8_t * str, uint8_t * format, ... );
-@@ -977,7 +977,7 @@ float playdate_sys_getVolume(Cranked *cranked);
- int32_t playdate_sys_getPowerStatus(Cranked *cranked);
+-int32_t playdate_sys_vaFormatString(Cranked *cranked, cref_t * outstr, uint8_t * fmt, ... );
+-int32_t playdate_sys_parseString(Cranked *cranked, uint8_t * str, uint8_t * format, ... );
+-void playdate_sys_delay(Cranked *cranked, uint32_t milliseconds);
++int32 playdate_sys_vaFormatString(Cranked *cranked, cref_t * outstr, uint8_t * fmt, ... );
++int32 playdate_sys_parseString(Cranked *cranked, uint8_t * str, uint8_t * format, ... );
++void playdate_sys_delay(Cranked *cranked, uint32 milliseconds);
+ void playdate_sys_getServerTime(Cranked *cranked, cref_t callback);
+ void playdate_sys_restartGame(Cranked *cranked, uint8_t * launchargs);
+ uint8_t * playdate_sys_getLaunchArgs(Cranked *cranked, cref_t * outpath);
+-uint8_t playdate_sys_sendMirrorData(Cranked *cranked, uint8_t command, void * data, int32_t len);
++uint8_t playdate_sys_sendMirrorData(Cranked *cranked, uint8_t command, void * data, int32 len);
+ PDInfo_32 * playdate_sys_getSystemInfo(Cranked *cranked);
+-uint8_t * playdate_sys_getLocalizedText(Cranked *cranked, uint8_t * key, int32_t language);
++uint8_t * playdate_sys_getLocalizedText(Cranked *cranked, uint8_t * key, int32 language);
+ float playdate_sys_getVolume(Cranked *cranked);
+-int32_t playdate_sys_getPowerStatus(Cranked *cranked);
++int32 playdate_sys_getPowerStatus(Cranked *cranked);
  void playdate_sys_exitToLauncher(Cranked *cranked);
  uint8_t * playdate_file_geterr(Cranked *cranked);
 -int32_t playdate_file_listfiles(Cranked *cranked, uint8_t * path, cref_t callback, void * userdata, int32_t showhidden);
-+int32_t playdate_file_listfiles(Cranked *cranked, uint8_t * path, cref_t callback, cref_t userdata, int32_t showhidden);
- int32_t playdate_file_stat(Cranked *cranked, uint8_t * path, FileStat_32 * stat);
- int32_t playdate_file_mkdir(Cranked *cranked, uint8_t * path);
- int32_t playdate_file_unlink(Cranked *cranked, uint8_t * name, int32_t recursive);
-@@ -1144,8 +1144,8 @@ cref_t * playdate_sprite_overlappingSprites(Cranked *cranked, LCDSprite_32 * spr
- cref_t * playdate_sprite_allOverlappingSprites(Cranked *cranked, int32_t * len);
+-int32_t playdate_file_stat(Cranked *cranked, uint8_t * path, FileStat_32 * stat);
+-int32_t playdate_file_mkdir(Cranked *cranked, uint8_t * path);
+-int32_t playdate_file_unlink(Cranked *cranked, uint8_t * name, int32_t recursive);
+-int32_t playdate_file_rename(Cranked *cranked, uint8_t * from, uint8_t * to);
+-SDFile_32 * playdate_file_open(Cranked *cranked, uint8_t * name, int32_t mode);
+-int32_t playdate_file_close(Cranked *cranked, SDFile_32 * file);
+-int32_t playdate_file_read(Cranked *cranked, SDFile_32 * file, void * buf, uint32_t len);
+-int32_t playdate_file_write(Cranked *cranked, SDFile_32 * file, void * buf, uint32_t len);
+-int32_t playdate_file_flush(Cranked *cranked, SDFile_32 * file);
+-int32_t playdate_file_tell(Cranked *cranked, SDFile_32 * file);
+-int32_t playdate_file_seek(Cranked *cranked, SDFile_32 * file, int32_t pos, int32_t whence);
++int32 playdate_file_listfiles(Cranked *cranked, uint8_t * path, cref_t callback, cref_t userdata, int32 showhidden);
++int32 playdate_file_stat(Cranked *cranked, uint8_t * path, FileStat_32 * stat);
++int32 playdate_file_mkdir(Cranked *cranked, uint8_t * path);
++int32 playdate_file_unlink(Cranked *cranked, uint8_t * name, int32 recursive);
++int32 playdate_file_rename(Cranked *cranked, uint8_t * from, uint8_t * to);
++SDFile_32 * playdate_file_open(Cranked *cranked, uint8_t * name, int32 mode);
++int32 playdate_file_close(Cranked *cranked, SDFile_32 * file);
++int32 playdate_file_read(Cranked *cranked, SDFile_32 * file, void * buf, uint32 len);
++int32 playdate_file_write(Cranked *cranked, SDFile_32 * file, void * buf, uint32 len);
++int32 playdate_file_flush(Cranked *cranked, SDFile_32 * file);
++int32 playdate_file_tell(Cranked *cranked, SDFile_32 * file);
++int32 playdate_file_seek(Cranked *cranked, SDFile_32 * file, int32 pos, int32 whence);
+ LCDVideoPlayer_32 * playdate_video_loadVideo(Cranked *cranked, uint8_t * path);
+ void playdate_video_freePlayer(Cranked *cranked, LCDVideoPlayer_32 * p);
+-int32_t playdate_video_setContext(Cranked *cranked, LCDVideoPlayer_32 * p, LCDBitmap_32 * context);
++int32 playdate_video_setContext(Cranked *cranked, LCDVideoPlayer_32 * p, LCDBitmap_32 * context);
+ void playdate_video_useScreenContext(Cranked *cranked, LCDVideoPlayer_32 * p);
+-int32_t playdate_video_renderFrame(Cranked *cranked, LCDVideoPlayer_32 * p, int32_t n);
++int32 playdate_video_renderFrame(Cranked *cranked, LCDVideoPlayer_32 * p, int32 n);
+ uint8_t * playdate_video_getError(Cranked *cranked, LCDVideoPlayer_32 * p);
+-void playdate_video_getInfo(Cranked *cranked, LCDVideoPlayer_32 * p, int32_t * outWidth, int32_t * outHeight, float * outFrameRate, int32_t * outFrameCount, int32_t * outCurrentFrame);
++void playdate_video_getInfo(Cranked *cranked, LCDVideoPlayer_32 * p, int32 * outWidth, int32 * outHeight, float * outFrameRate, int32 * outFrameCount, int32 * outCurrentFrame);
+ LCDBitmap_32 * playdate_video_getContext(Cranked *cranked, LCDVideoPlayer_32 * p);
+-void playdate_graphics_clear(Cranked *cranked, uint32_t color);
+-void playdate_graphics_setBackgroundColor(Cranked *cranked, int32_t color);
++void playdate_graphics_clear(Cranked *cranked, uint32 color);
++void playdate_graphics_setBackgroundColor(Cranked *cranked, int32 color);
+ void playdate_graphics_setStencil(Cranked *cranked, LCDBitmap_32 * stencil);
+-int32_t playdate_graphics_setDrawMode(Cranked *cranked, int32_t mode);
+-void playdate_graphics_setDrawOffset(Cranked *cranked, int32_t dx, int32_t dy);
+-void playdate_graphics_setClipRect(Cranked *cranked, int32_t x, int32_t y, int32_t width, int32_t height);
++int32 playdate_graphics_setDrawMode(Cranked *cranked, int32 mode);
++void playdate_graphics_setDrawOffset(Cranked *cranked, int32 dx, int32 dy);
++void playdate_graphics_setClipRect(Cranked *cranked, int32 x, int32 y, int32 width, int32 height);
+ void playdate_graphics_clearClipRect(Cranked *cranked);
+-void playdate_graphics_setLineCapStyle(Cranked *cranked, int32_t endCapStyle);
++void playdate_graphics_setLineCapStyle(Cranked *cranked, int32 endCapStyle);
+ void playdate_graphics_setFont(Cranked *cranked, LCDFont_32 * font);
+-void playdate_graphics_setTextTracking(Cranked *cranked, int32_t tracking);
++void playdate_graphics_setTextTracking(Cranked *cranked, int32 tracking);
+ void playdate_graphics_pushContext(Cranked *cranked, LCDBitmap_32 * target);
+ void playdate_graphics_popContext(Cranked *cranked);
+-void playdate_graphics_drawBitmap(Cranked *cranked, LCDBitmap_32 * bitmap, int32_t x, int32_t y, int32_t flip);
+-void playdate_graphics_tileBitmap(Cranked *cranked, LCDBitmap_32 * bitmap, int32_t x, int32_t y, int32_t width, int32_t height, int32_t flip);
+-void playdate_graphics_drawLine(Cranked *cranked, int32_t x1, int32_t y1, int32_t x2, int32_t y2, int32_t width, uint32_t color);
+-void playdate_graphics_fillTriangle(Cranked *cranked, int32_t x1, int32_t y1, int32_t x2, int32_t y2, int32_t x3, int32_t y3, uint32_t color);
+-void playdate_graphics_drawRect(Cranked *cranked, int32_t x, int32_t y, int32_t width, int32_t height, uint32_t color);
+-void playdate_graphics_fillRect(Cranked *cranked, int32_t x, int32_t y, int32_t width, int32_t height, uint32_t color);
+-void playdate_graphics_drawEllipse(Cranked *cranked, int32_t x, int32_t y, int32_t width, int32_t height, int32_t lineWidth, float startAngle, float endAngle, uint32_t color);
+-void playdate_graphics_fillEllipse(Cranked *cranked, int32_t x, int32_t y, int32_t width, int32_t height, float startAngle, float endAngle, uint32_t color);
+-void playdate_graphics_drawScaledBitmap(Cranked *cranked, LCDBitmap_32 * bitmap, int32_t x, int32_t y, float xscale, float yscale);
+-int32_t playdate_graphics_drawText(Cranked *cranked, void * text, uint32_t len, int32_t encoding, int32_t x, int32_t y);
+-LCDBitmap_32 * playdate_graphics_newBitmap(Cranked *cranked, int32_t width, int32_t height, uint32_t bgcolor);
++void playdate_graphics_drawBitmap(Cranked *cranked, LCDBitmap_32 * bitmap, int32 x, int32 y, int32 flip);
++void playdate_graphics_tileBitmap(Cranked *cranked, LCDBitmap_32 * bitmap, int32 x, int32 y, int32 width, int32 height, int32 flip);
++void playdate_graphics_drawLine(Cranked *cranked, int32 x1, int32 y1, int32 x2, int32 y2, int32 width, uint32 color);
++void playdate_graphics_fillTriangle(Cranked *cranked, int32 x1, int32 y1, int32 x2, int32 y2, int32 x3, int32 y3, uint32 color);
++void playdate_graphics_drawRect(Cranked *cranked, int32 x, int32 y, int32 width, int32 height, uint32 color);
++void playdate_graphics_fillRect(Cranked *cranked, int32 x, int32 y, int32 width, int32 height, uint32 color);
++void playdate_graphics_drawEllipse(Cranked *cranked, int32 x, int32 y, int32 width, int32 height, int32 lineWidth, float startAngle, float endAngle, uint32 color);
++void playdate_graphics_fillEllipse(Cranked *cranked, int32 x, int32 y, int32 width, int32 height, float startAngle, float endAngle, uint32 color);
++void playdate_graphics_drawScaledBitmap(Cranked *cranked, LCDBitmap_32 * bitmap, int32 x, int32 y, float xscale, float yscale);
++int32 playdate_graphics_drawText(Cranked *cranked, void * text, uint32 len, int32 encoding, int32 x, int32 y);
++LCDBitmap_32 * playdate_graphics_newBitmap(Cranked *cranked, int32 width, int32 height, uint32 bgcolor);
+ void playdate_graphics_freeBitmap(Cranked *cranked, LCDBitmap_32 * );
+ LCDBitmap_32 * playdate_graphics_loadBitmap(Cranked *cranked, uint8_t * path, cref_t * outerr);
+ LCDBitmap_32 * playdate_graphics_copyBitmap(Cranked *cranked, LCDBitmap_32 * bitmap);
+ void playdate_graphics_loadIntoBitmap(Cranked *cranked, uint8_t * path, LCDBitmap_32 * bitmap, cref_t * outerr);
+-void playdate_graphics_getBitmapData(Cranked *cranked, LCDBitmap_32 * bitmap, int32_t * width, int32_t * height, int32_t * rowbytes, cref_t * mask, cref_t * data);
+-void playdate_graphics_clearBitmap(Cranked *cranked, LCDBitmap_32 * bitmap, uint32_t bgcolor);
+-LCDBitmap_32 * playdate_graphics_rotatedBitmap(Cranked *cranked, LCDBitmap_32 * bitmap, float rotation, float xscale, float yscale, int32_t * allocedSize);
+-LCDBitmapTable_32 * playdate_graphics_newBitmapTable(Cranked *cranked, int32_t count, int32_t width, int32_t height);
++void playdate_graphics_getBitmapData(Cranked *cranked, LCDBitmap_32 * bitmap, int32 * width, int32 * height, int32 * rowbytes, cref_t * mask, cref_t * data);
++void playdate_graphics_clearBitmap(Cranked *cranked, LCDBitmap_32 * bitmap, uint32 bgcolor);
++LCDBitmap_32 * playdate_graphics_rotatedBitmap(Cranked *cranked, LCDBitmap_32 * bitmap, float rotation, float xscale, float yscale, int32 * allocedSize);
++LCDBitmapTable_32 * playdate_graphics_newBitmapTable(Cranked *cranked, int32 count, int32 width, int32 height);
+ void playdate_graphics_freeBitmapTable(Cranked *cranked, LCDBitmapTable_32 * table);
+ LCDBitmapTable_32 * playdate_graphics_loadBitmapTable(Cranked *cranked, uint8_t * path, cref_t * outerr);
+ void playdate_graphics_loadIntoBitmapTable(Cranked *cranked, uint8_t * path, LCDBitmapTable_32 * table, cref_t * outerr);
+-LCDBitmap_32 * playdate_graphics_getTableBitmap(Cranked *cranked, LCDBitmapTable_32 * table, int32_t idx);
++LCDBitmap_32 * playdate_graphics_getTableBitmap(Cranked *cranked, LCDBitmapTable_32 * table, int32 idx);
+ LCDFont_32 * playdate_graphics_loadFont(Cranked *cranked, uint8_t * path, cref_t * outErr);
+-LCDFontPage_32 * playdate_graphics_getFontPage(Cranked *cranked, LCDFont_32 * font, uint32_t c);
+-LCDFontGlyph_32 * playdate_graphics_getPageGlyph(Cranked *cranked, LCDFontPage_32 * page, uint32_t c, cref_t * bitmap, int32_t * advance);
+-int32_t playdate_graphics_getGlyphKerning(Cranked *cranked, LCDFontGlyph_32 * glyph, uint32_t glyphcode, uint32_t nextcode);
+-int32_t playdate_graphics_getTextWidth(Cranked *cranked, LCDFont_32 * font, void * text, uint32_t len, int32_t encoding, int32_t tracking);
++LCDFontPage_32 * playdate_graphics_getFontPage(Cranked *cranked, LCDFont_32 * font, uint32 c);
++LCDFontGlyph_32 * playdate_graphics_getPageGlyph(Cranked *cranked, LCDFontPage_32 * page, uint32 c, cref_t * bitmap, int32 * advance);
++int32 playdate_graphics_getGlyphKerning(Cranked *cranked, LCDFontGlyph_32 * glyph, uint32 glyphcode, uint32 nextcode);
++int32 playdate_graphics_getTextWidth(Cranked *cranked, LCDFont_32 * font, void * text, uint32 len, int32 encoding, int32 tracking);
+ uint8_t * playdate_graphics_getFrame(Cranked *cranked);
+ uint8_t * playdate_graphics_getDisplayFrame(Cranked *cranked);
+ LCDBitmap_32 * playdate_graphics_copyFrameBufferBitmap(Cranked *cranked);
+-void playdate_graphics_markUpdatedRows(Cranked *cranked, int32_t start, int32_t end);
++void playdate_graphics_markUpdatedRows(Cranked *cranked, int32 start, int32 end);
+ void playdate_graphics_display(Cranked *cranked);
+-void playdate_graphics_setColorToPattern(Cranked *cranked, uint32_t * color, LCDBitmap_32 * bitmap, int32_t x, int32_t y);
+-int32_t playdate_graphics_checkMaskCollision(Cranked *cranked, LCDBitmap_32 * bitmap1, int32_t x1, int32_t y1, int32_t flip1, LCDBitmap_32 * bitmap2, int32_t x2, int32_t y2, int32_t flip2, LCDRect_32 rect);
+-void playdate_graphics_setScreenClipRect(Cranked *cranked, int32_t x, int32_t y, int32_t width, int32_t height);
+-void playdate_graphics_fillPolygon(Cranked *cranked, int32_t nPoints, int32_t * coords, uint32_t color, int32_t fillrule);
++void playdate_graphics_setColorToPattern(Cranked *cranked, uint32 * color, LCDBitmap_32 * bitmap, int32 x, int32 y);
++int32 playdate_graphics_checkMaskCollision(Cranked *cranked, LCDBitmap_32 * bitmap1, int32 x1, int32 y1, int32 flip1, LCDBitmap_32 * bitmap2, int32 x2, int32 y2, int32 flip2, LCDRect_32 rect);
++void playdate_graphics_setScreenClipRect(Cranked *cranked, int32 x, int32 y, int32 width, int32 height);
++void playdate_graphics_fillPolygon(Cranked *cranked, int32 nPoints, int32 * coords, uint32 color, int32 fillrule);
+ uint8_t playdate_graphics_getFontHeight(Cranked *cranked, LCDFont_32 * font);
+ LCDBitmap_32 * playdate_graphics_getDisplayBufferBitmap(Cranked *cranked);
+-void playdate_graphics_drawRotatedBitmap(Cranked *cranked, LCDBitmap_32 * bitmap, int32_t x, int32_t y, float rotation, float centerx, float centery, float xscale, float yscale);
+-void playdate_graphics_setTextLeading(Cranked *cranked, int32_t lineHeightAdustment);
+-int32_t playdate_graphics_setBitmapMask(Cranked *cranked, LCDBitmap_32 * bitmap, LCDBitmap_32 * mask);
++void playdate_graphics_drawRotatedBitmap(Cranked *cranked, LCDBitmap_32 * bitmap, int32 x, int32 y, float rotation, float centerx, float centery, float xscale, float yscale);
++void playdate_graphics_setTextLeading(Cranked *cranked, int32 lineHeightAdustment);
++int32 playdate_graphics_setBitmapMask(Cranked *cranked, LCDBitmap_32 * bitmap, LCDBitmap_32 * mask);
+ LCDBitmap_32 * playdate_graphics_getBitmapMask(Cranked *cranked, LCDBitmap_32 * bitmap);
+-void playdate_graphics_setStencilImage(Cranked *cranked, LCDBitmap_32 * stencil, int32_t tile);
+-LCDFont_32 * playdate_graphics_makeFontFromData_deprecated(Cranked *cranked, LCDFontData_32 * data, int32_t wide);
+-int32_t playdate_graphics_getTextTracking(Cranked *cranked);
+-void playdate_graphics_setPixel(Cranked *cranked, int32_t x, int32_t y, uint32_t c);
+-int32_t playdate_graphics_getBitmapPixel(Cranked *cranked, LCDBitmap_32 * bitmap, int32_t x, int32_t y);
+-void playdate_graphics_getBitmapTableInfo(Cranked *cranked, LCDBitmapTable_32 * table, int32_t * count, int32_t * width);
+-void playdate_graphics_drawTextInRect(Cranked *cranked, void * text, uint32_t len, int32_t encoding, int32_t x, int32_t y, int32_t width, int32_t height, int32_t wrap, int32_t align);
+-int32_t playdate_graphics_getTextHeightForMaxWidth(Cranked *cranked, LCDFont_32 * font, void * text, uint32_t len, int32_t maxwidth, int32_t encoding, int32_t wrap, int32_t tracking, int32_t extraLeading);
+-void playdate_graphics_drawRoundRect(Cranked *cranked, int32_t x, int32_t y, int32_t width, int32_t height, int32_t radius, int32_t lineWidth, uint32_t color);
+-void playdate_graphics_fillRoundRect(Cranked *cranked, int32_t x, int32_t y, int32_t width, int32_t height, int32_t radius, uint32_t color);
++void playdate_graphics_setStencilImage(Cranked *cranked, LCDBitmap_32 * stencil, int32 tile);
++LCDFont_32 * playdate_graphics_makeFontFromData_deprecated(Cranked *cranked, LCDFontData_32 * data, int32 wide);
++int32 playdate_graphics_getTextTracking(Cranked *cranked);
++void playdate_graphics_setPixel(Cranked *cranked, int32 x, int32 y, uint32 c);
++int32 playdate_graphics_getBitmapPixel(Cranked *cranked, LCDBitmap_32 * bitmap, int32 x, int32 y);
++void playdate_graphics_getBitmapTableInfo(Cranked *cranked, LCDBitmapTable_32 * table, int32 * count, int32 * width);
++void playdate_graphics_drawTextInRect(Cranked *cranked, void * text, uint32 len, int32 encoding, int32 x, int32 y, int32 width, int32 height, int32 wrap, int32 align);
++int32 playdate_graphics_getTextHeightForMaxWidth(Cranked *cranked, LCDFont_32 * font, void * text, uint32 len, int32 maxwidth, int32 encoding, int32 wrap, int32 tracking, int32 extraLeading);
++void playdate_graphics_drawRoundRect(Cranked *cranked, int32 x, int32 y, int32 width, int32 height, int32 radius, int32 lineWidth, uint32 color);
++void playdate_graphics_fillRoundRect(Cranked *cranked, int32 x, int32 y, int32 width, int32 height, int32 radius, uint32 color);
+ LCDTileMap_32 * playdate_tilemap_newTilemap(Cranked *cranked);
+ void playdate_tilemap_freeTilemap(Cranked *cranked, LCDTileMap_32 * m);
+ void playdate_tilemap_setImageTable(Cranked *cranked, LCDTileMap_32 * m, LCDBitmapTable_32 * table);
+ LCDBitmapTable_32 * playdate_tilemap_getImageTable(Cranked *cranked, LCDTileMap_32 * m);
+-void playdate_tilemap_setSize(Cranked *cranked, LCDTileMap_32 * m, int32_t tilesWide, int32_t tilesHigh);
+-void playdate_tilemap_getSize(Cranked *cranked, LCDTileMap_32 * m, int32_t * tilesWide, int32_t * tilesHigh);
+-void playdate_tilemap_getPixelSize(Cranked *cranked, LCDTileMap_32 * m, uint32_t * outWidth, uint32_t * outHeight);
+-void playdate_tilemap_setTiles(Cranked *cranked, LCDTileMap_32 * m, uint16_t * indexes, int32_t count, int32_t rowwidth);
+-void playdate_tilemap_setTileAtPosition(Cranked *cranked, LCDTileMap_32 * m, int32_t x, int32_t y, uint16_t idx);
+-int32_t playdate_tilemap_getTileAtPosition(Cranked *cranked, LCDTileMap_32 * m, int32_t x, int32_t y);
++void playdate_tilemap_setSize(Cranked *cranked, LCDTileMap_32 * m, int32 tilesWide, int32 tilesHigh);
++void playdate_tilemap_getSize(Cranked *cranked, LCDTileMap_32 * m, int32 * tilesWide, int32 * tilesHigh);
++void playdate_tilemap_getPixelSize(Cranked *cranked, LCDTileMap_32 * m, uint32 * outWidth, uint32 * outHeight);
++void playdate_tilemap_setTiles(Cranked *cranked, LCDTileMap_32 * m, uint16_t * indexes, int32 count, int32 rowwidth);
++void playdate_tilemap_setTileAtPosition(Cranked *cranked, LCDTileMap_32 * m, int32 x, int32 y, uint16_t idx);
++int32 playdate_tilemap_getTileAtPosition(Cranked *cranked, LCDTileMap_32 * m, int32 x, int32 y);
+ void playdate_tilemap_drawAtPoint(Cranked *cranked, LCDTileMap_32 * m, float x, float y);
+ LCDStreamPlayer_32 * playdate_videostream_newPlayer(Cranked *cranked);
+ void playdate_videostream_freePlayer(Cranked *cranked, LCDStreamPlayer_32 * p);
+-void playdate_videostream_setBufferSize(Cranked *cranked, LCDStreamPlayer_32 * p, int32_t video, int32_t audio);
++void playdate_videostream_setBufferSize(Cranked *cranked, LCDStreamPlayer_32 * p, int32 video, int32 audio);
+ void playdate_videostream_setFile(Cranked *cranked, LCDStreamPlayer_32 * p, SDFile_32 * file);
+ void playdate_videostream_setHTTPConnection(Cranked *cranked, LCDStreamPlayer_32 * p, HTTPConnection_32 * conn);
+ FilePlayer_32 * playdate_videostream_getFilePlayer(Cranked *cranked, LCDStreamPlayer_32 * p);
+ LCDVideoPlayer_32 * playdate_videostream_getVideoPlayer(Cranked *cranked, LCDStreamPlayer_32 * p);
+ uint8_t playdate_videostream_update(Cranked *cranked, LCDStreamPlayer_32 * p);
+-int32_t playdate_videostream_getBufferedFrameCount(Cranked *cranked, LCDStreamPlayer_32 * p);
+-uint32_t playdate_videostream_getBytesRead(Cranked *cranked, LCDStreamPlayer_32 * p);
++int32 playdate_videostream_getBufferedFrameCount(Cranked *cranked, LCDStreamPlayer_32 * p);
++uint32 playdate_videostream_getBytesRead(Cranked *cranked, LCDStreamPlayer_32 * p);
+ void playdate_videostream_setTCPConnection(Cranked *cranked, LCDStreamPlayer_32 * p, TCPConnection_32 * conn);
+-LCDFontGlyph_32 * playdate_graphics_getFontGlyph(Cranked *cranked, LCDFont_32 * font, uint32_t c, cref_t * bitmap, int32_t * advance);
+-LCDFont_32 * playdate_graphics_makeFontFromData(Cranked *cranked, LCDFontData_32 * data, int32_t wide, int32_t datalength);
+-void playdate_sprite_setAlwaysRedraw(Cranked *cranked, int32_t flag);
++LCDFontGlyph_32 * playdate_graphics_getFontGlyph(Cranked *cranked, LCDFont_32 * font, uint32 c, cref_t * bitmap, int32 * advance);
++LCDFont_32 * playdate_graphics_makeFontFromData(Cranked *cranked, LCDFontData_32 * data, int32 wide, int32 datalength);
++void playdate_sprite_setAlwaysRedraw(Cranked *cranked, int32 flag);
+ void playdate_sprite_addDirtyRect(Cranked *cranked, LCDRect_32 dirtyRect);
+ void playdate_sprite_drawSprites(Cranked *cranked);
+ void playdate_sprite_updateAndDrawSprites(Cranked *cranked);
+@@ -1095,37 +1095,37 @@ void playdate_sprite_freeSprite(Cranked *cranked, LCDSprite_32 * sprite);
+ LCDSprite_32 * playdate_sprite_copy(Cranked *cranked, LCDSprite_32 * sprite);
+ void playdate_sprite_addSprite(Cranked *cranked, LCDSprite_32 * sprite);
+ void playdate_sprite_removeSprite(Cranked *cranked, LCDSprite_32 * sprite);
+-void playdate_sprite_removeSprites(Cranked *cranked, cref_t * sprites, int32_t count);
++void playdate_sprite_removeSprites(Cranked *cranked, cref_t * sprites, int32 count);
+ void playdate_sprite_removeAllSprites(Cranked *cranked);
+-int32_t playdate_sprite_getSpriteCount(Cranked *cranked);
++int32 playdate_sprite_getSpriteCount(Cranked *cranked);
+ void playdate_sprite_setBounds(Cranked *cranked, LCDSprite_32 * sprite, PDRect_32 bounds);
+ PDRect_32 playdate_sprite_getBounds(Cranked *cranked, LCDSprite_32 * sprite);
+ void playdate_sprite_moveTo(Cranked *cranked, LCDSprite_32 * sprite, float x, float y);
+ void playdate_sprite_moveBy(Cranked *cranked, LCDSprite_32 * sprite, float dx, float dy);
+-void playdate_sprite_setImage(Cranked *cranked, LCDSprite_32 * sprite, LCDBitmap_32 * image, int32_t flip);
++void playdate_sprite_setImage(Cranked *cranked, LCDSprite_32 * sprite, LCDBitmap_32 * image, int32 flip);
+ LCDBitmap_32 * playdate_sprite_getImage(Cranked *cranked, LCDSprite_32 * sprite);
+ void playdate_sprite_setSize(Cranked *cranked, LCDSprite_32 * s, float width, float height);
+ void playdate_sprite_setZIndex(Cranked *cranked, LCDSprite_32 * sprite, int16_t zIndex);
+ int16_t playdate_sprite_getZIndex(Cranked *cranked, LCDSprite_32 * sprite);
+-void playdate_sprite_setDrawMode(Cranked *cranked, LCDSprite_32 * sprite, int32_t mode);
+-void playdate_sprite_setImageFlip(Cranked *cranked, LCDSprite_32 * sprite, int32_t flip);
+-int32_t playdate_sprite_getImageFlip(Cranked *cranked, LCDSprite_32 * sprite);
++void playdate_sprite_setDrawMode(Cranked *cranked, LCDSprite_32 * sprite, int32 mode);
++void playdate_sprite_setImageFlip(Cranked *cranked, LCDSprite_32 * sprite, int32 flip);
++int32 playdate_sprite_getImageFlip(Cranked *cranked, LCDSprite_32 * sprite);
+ void playdate_sprite_setStencil(Cranked *cranked, LCDSprite_32 * sprite, LCDBitmap_32 * stencil);
+ void playdate_sprite_setClipRect(Cranked *cranked, LCDSprite_32 * sprite, LCDRect_32 clipRect);
+ void playdate_sprite_clearClipRect(Cranked *cranked, LCDSprite_32 * sprite);
+-void playdate_sprite_setClipRectsInRange(Cranked *cranked, LCDRect_32 clipRect, int32_t startZ, int32_t endZ);
+-void playdate_sprite_clearClipRectsInRange(Cranked *cranked, int32_t startZ, int32_t endZ);
+-void playdate_sprite_setUpdatesEnabled(Cranked *cranked, LCDSprite_32 * sprite, int32_t flag);
+-int32_t playdate_sprite_updatesEnabled(Cranked *cranked, LCDSprite_32 * sprite);
+-void playdate_sprite_setCollisionsEnabled(Cranked *cranked, LCDSprite_32 * sprite, int32_t flag);
+-int32_t playdate_sprite_collisionsEnabled(Cranked *cranked, LCDSprite_32 * sprite);
+-void playdate_sprite_setVisible(Cranked *cranked, LCDSprite_32 * sprite, int32_t flag);
+-int32_t playdate_sprite_isVisible(Cranked *cranked, LCDSprite_32 * sprite);
+-void playdate_sprite_setOpaque(Cranked *cranked, LCDSprite_32 * sprite, int32_t flag);
++void playdate_sprite_setClipRectsInRange(Cranked *cranked, LCDRect_32 clipRect, int32 startZ, int32 endZ);
++void playdate_sprite_clearClipRectsInRange(Cranked *cranked, int32 startZ, int32 endZ);
++void playdate_sprite_setUpdatesEnabled(Cranked *cranked, LCDSprite_32 * sprite, int32 flag);
++int32 playdate_sprite_updatesEnabled(Cranked *cranked, LCDSprite_32 * sprite);
++void playdate_sprite_setCollisionsEnabled(Cranked *cranked, LCDSprite_32 * sprite, int32 flag);
++int32 playdate_sprite_collisionsEnabled(Cranked *cranked, LCDSprite_32 * sprite);
++void playdate_sprite_setVisible(Cranked *cranked, LCDSprite_32 * sprite, int32 flag);
++int32 playdate_sprite_isVisible(Cranked *cranked, LCDSprite_32 * sprite);
++void playdate_sprite_setOpaque(Cranked *cranked, LCDSprite_32 * sprite, int32 flag);
+ void playdate_sprite_markDirty(Cranked *cranked, LCDSprite_32 * sprite);
+ void playdate_sprite_setTag(Cranked *cranked, LCDSprite_32 * sprite, uint8_t tag);
+ uint8_t playdate_sprite_getTag(Cranked *cranked, LCDSprite_32 * sprite);
+-void playdate_sprite_setIgnoresDrawOffset(Cranked *cranked, LCDSprite_32 * sprite, int32_t flag);
++void playdate_sprite_setIgnoresDrawOffset(Cranked *cranked, LCDSprite_32 * sprite, int32 flag);
+ void playdate_sprite_setUpdateFunction(Cranked *cranked, LCDSprite_32 * sprite, cref_t func);
+ void playdate_sprite_setDrawFunction(Cranked *cranked, LCDSprite_32 * sprite, cref_t func);
+ void playdate_sprite_getPosition(Cranked *cranked, LCDSprite_32 * sprite, float * x, float * y);
+@@ -1134,41 +1134,41 @@ void playdate_sprite_setCollideRect(Cranked *cranked, LCDSprite_32 * sprite, PDR
+ PDRect_32 playdate_sprite_getCollideRect(Cranked *cranked, LCDSprite_32 * sprite);
+ void playdate_sprite_clearCollideRect(Cranked *cranked, LCDSprite_32 * sprite);
+ void playdate_sprite_setCollisionResponseFunction(Cranked *cranked, LCDSprite_32 * sprite, cref_t func);
+-SpriteCollisionInfo_32 * playdate_sprite_checkCollisions(Cranked *cranked, LCDSprite_32 * sprite, float goalX, float goalY, float * actualX, float * actualY, int32_t * len);
+-SpriteCollisionInfo_32 * playdate_sprite_moveWithCollisions(Cranked *cranked, LCDSprite_32 * sprite, float goalX, float goalY, float * actualX, float * actualY, int32_t * len);
+-cref_t * playdate_sprite_querySpritesAtPoint(Cranked *cranked, float x, float y, int32_t * len);
+-cref_t * playdate_sprite_querySpritesInRect(Cranked *cranked, float x, float y, float width, float height, int32_t * len);
+-cref_t * playdate_sprite_querySpritesAlongLine(Cranked *cranked, float x1, float y1, float x2, float y2, int32_t * len);
+-SpriteQueryInfo_32 * playdate_sprite_querySpriteInfoAlongLine(Cranked *cranked, float x1, float y1, float x2, float y2, int32_t * len);
+-cref_t * playdate_sprite_overlappingSprites(Cranked *cranked, LCDSprite_32 * sprite, int32_t * len);
+-cref_t * playdate_sprite_allOverlappingSprites(Cranked *cranked, int32_t * len);
++SpriteCollisionInfo_32 * playdate_sprite_checkCollisions(Cranked *cranked, LCDSprite_32 * sprite, float goalX, float goalY, float * actualX, float * actualY, int32 * len);
++SpriteCollisionInfo_32 * playdate_sprite_moveWithCollisions(Cranked *cranked, LCDSprite_32 * sprite, float goalX, float goalY, float * actualX, float * actualY, int32 * len);
++cref_t * playdate_sprite_querySpritesAtPoint(Cranked *cranked, float x, float y, int32 * len);
++cref_t * playdate_sprite_querySpritesInRect(Cranked *cranked, float x, float y, float width, float height, int32 * len);
++cref_t * playdate_sprite_querySpritesAlongLine(Cranked *cranked, float x1, float y1, float x2, float y2, int32 * len);
++SpriteQueryInfo_32 * playdate_sprite_querySpriteInfoAlongLine(Cranked *cranked, float x1, float y1, float x2, float y2, int32 * len);
++cref_t * playdate_sprite_overlappingSprites(Cranked *cranked, LCDSprite_32 * sprite, int32 * len);
++cref_t * playdate_sprite_allOverlappingSprites(Cranked *cranked, int32 * len);
  void playdate_sprite_setStencilPattern(Cranked *cranked, LCDSprite_32 * sprite, uint8_t * pattern);
  void playdate_sprite_clearStencil(Cranked *cranked, LCDSprite_32 * sprite);
 -void playdate_sprite_setUserdata(Cranked *cranked, LCDSprite_32 * sprite, void * userdata);
 -void * playdate_sprite_getUserdata(Cranked *cranked, LCDSprite_32 * sprite);
+-void playdate_sprite_setStencilImage(Cranked *cranked, LCDSprite_32 * sprite, LCDBitmap_32 * stencil, int32_t tile);
 +void playdate_sprite_setUserdata(Cranked *cranked, LCDSprite_32 * sprite, cref_t userdata);
 +cref_t playdate_sprite_getUserdata(Cranked *cranked, LCDSprite_32 * sprite);
- void playdate_sprite_setStencilImage(Cranked *cranked, LCDSprite_32 * sprite, LCDBitmap_32 * stencil, int32_t tile);
++void playdate_sprite_setStencilImage(Cranked *cranked, LCDSprite_32 * sprite, LCDBitmap_32 * stencil, int32 tile);
  void playdate_sprite_setCenter(Cranked *cranked, LCDSprite_32 * s, float x, float y);
  void playdate_sprite_getCenter(Cranked *cranked, LCDSprite_32 * s, float * x, float * y);
-@@ -1166,7 +1166,7 @@ SoundChannel_32 * playdate_sound_channel_newChannel(Cranked *cranked);
+ void playdate_sprite_setTilemap(Cranked *cranked, LCDSprite_32 * s, LCDTileMap_32 * tilemap);
+ LCDTileMap_32 * playdate_sprite_getTilemap(Cranked *cranked, LCDSprite_32 * s);
+ void playdate_sprite_markDirtyRect(Cranked *cranked, LCDSprite_32 * s, PDRect_32 rect);
+-int32_t playdate_display_getWidth(Cranked *cranked);
+-int32_t playdate_display_getHeight(Cranked *cranked);
++int32 playdate_display_getWidth(Cranked *cranked);
++int32 playdate_display_getHeight(Cranked *cranked);
+ void playdate_display_setRefreshRate(Cranked *cranked, float rate);
+-void playdate_display_setInverted(Cranked *cranked, int32_t flag);
+-void playdate_display_setScale(Cranked *cranked, uint32_t s);
+-void playdate_display_setMosaic(Cranked *cranked, uint32_t x, uint32_t y);
+-void playdate_display_setFlipped(Cranked *cranked, int32_t x, int32_t y);
+-void playdate_display_setOffset(Cranked *cranked, int32_t x, int32_t y);
++void playdate_display_setInverted(Cranked *cranked, int32 flag);
++void playdate_display_setScale(Cranked *cranked, uint32 s);
++void playdate_display_setMosaic(Cranked *cranked, uint32 x, uint32 y);
++void playdate_display_setFlipped(Cranked *cranked, int32 x, int32 y);
++void playdate_display_setOffset(Cranked *cranked, int32 x, int32 y);
+ float playdate_display_getRefreshRate(Cranked *cranked);
+ float playdate_display_getFPS(Cranked *cranked);
+ SoundChannel_32 * playdate_sound_channel_newChannel(Cranked *cranked);
  void playdate_sound_channel_freeChannel(Cranked *cranked, SoundChannel_32 * channel);
- int32_t playdate_sound_channel_addSource(Cranked *cranked, SoundChannel_32 * channel, SoundSource_32 * source);
- int32_t playdate_sound_channel_removeSource(Cranked *cranked, SoundChannel_32 * channel, SoundSource_32 * source);
+-int32_t playdate_sound_channel_addSource(Cranked *cranked, SoundChannel_32 * channel, SoundSource_32 * source);
+-int32_t playdate_sound_channel_removeSource(Cranked *cranked, SoundChannel_32 * channel, SoundSource_32 * source);
 -SoundSource_32 * playdate_sound_channel_addCallbackSource(Cranked *cranked, SoundChannel_32 * channel, cref_t callback, void * context, int32_t stereo);
-+SoundSource_32 * playdate_sound_channel_addCallbackSource(Cranked *cranked, SoundChannel_32 * channel, cref_t callback, cref_t context, int32_t stereo);
- int32_t playdate_sound_channel_addEffect(Cranked *cranked, SoundChannel_32 * channel, SoundEffect_32 * effect);
- int32_t playdate_sound_channel_removeEffect(Cranked *cranked, SoundChannel_32 * channel, SoundEffect_32 * effect);
+-int32_t playdate_sound_channel_addEffect(Cranked *cranked, SoundChannel_32 * channel, SoundEffect_32 * effect);
+-int32_t playdate_sound_channel_removeEffect(Cranked *cranked, SoundChannel_32 * channel, SoundEffect_32 * effect);
++int32 playdate_sound_channel_addSource(Cranked *cranked, SoundChannel_32 * channel, SoundSource_32 * source);
++int32 playdate_sound_channel_removeSource(Cranked *cranked, SoundChannel_32 * channel, SoundSource_32 * source);
++SoundSource_32 * playdate_sound_channel_addCallbackSource(Cranked *cranked, SoundChannel_32 * channel, cref_t callback, cref_t context, int32 stereo);
++int32 playdate_sound_channel_addEffect(Cranked *cranked, SoundChannel_32 * channel, SoundEffect_32 * effect);
++int32 playdate_sound_channel_removeEffect(Cranked *cranked, SoundChannel_32 * channel, SoundEffect_32 * effect);
  void playdate_sound_channel_setVolume(Cranked *cranked, SoundChannel_32 * channel, float volume);
-@@ -1194,13 +1194,13 @@ void playdate_sound_fileplayer_setOffset(Cranked *cranked, FilePlayer_32 * playe
+ float playdate_sound_channel_getVolume(Cranked *cranked, SoundChannel_32 * channel);
+ void playdate_sound_channel_setVolumeModulator(Cranked *cranked, SoundChannel_32 * channel, PDSynthSignalValue_32 * mod);
+@@ -1181,10 +1181,10 @@ PDSynthSignalValue_32 * playdate_sound_channel_getWetLevelSignal(Cranked *cranke
+ SoundSource_32 * playdate_sound_channel_getOutputAsSource(Cranked *cranked, SoundChannel_32 * channel);
+ FilePlayer_32 * playdate_sound_fileplayer_newPlayer(Cranked *cranked);
+ void playdate_sound_fileplayer_freePlayer(Cranked *cranked, FilePlayer_32 * player);
+-int32_t playdate_sound_fileplayer_loadIntoPlayer(Cranked *cranked, FilePlayer_32 * player, uint8_t * path);
++int32 playdate_sound_fileplayer_loadIntoPlayer(Cranked *cranked, FilePlayer_32 * player, uint8_t * path);
+ void playdate_sound_fileplayer_setBufferLength(Cranked *cranked, FilePlayer_32 * player, float bufferLen);
+-int32_t playdate_sound_fileplayer_play(Cranked *cranked, FilePlayer_32 * player, int32_t repeat);
+-int32_t playdate_sound_fileplayer_isPlaying(Cranked *cranked, FilePlayer_32 * player);
++int32 playdate_sound_fileplayer_play(Cranked *cranked, FilePlayer_32 * player, int32 repeat);
++int32 playdate_sound_fileplayer_isPlaying(Cranked *cranked, FilePlayer_32 * player);
+ void playdate_sound_fileplayer_pause(Cranked *cranked, FilePlayer_32 * player);
+ void playdate_sound_fileplayer_stop(Cranked *cranked, FilePlayer_32 * player);
+ void playdate_sound_fileplayer_setVolume(Cranked *cranked, FilePlayer_32 * player, float left, float right);
+@@ -1193,48 +1193,48 @@ float playdate_sound_fileplayer_getLength(Cranked *cranked, FilePlayer_32 * play
+ void playdate_sound_fileplayer_setOffset(Cranked *cranked, FilePlayer_32 * player, float offset);
  void playdate_sound_fileplayer_setRate(Cranked *cranked, FilePlayer_32 * player, float rate);
  void playdate_sound_fileplayer_setLoopRange(Cranked *cranked, FilePlayer_32 * player, float start, float end);
- int32_t playdate_sound_fileplayer_didUnderrun(Cranked *cranked, FilePlayer_32 * player);
+-int32_t playdate_sound_fileplayer_didUnderrun(Cranked *cranked, FilePlayer_32 * player);
 -void playdate_sound_fileplayer_setFinishCallback(Cranked *cranked, FilePlayer_32 * player, cref_t callback, void * userdata);
 -void playdate_sound_fileplayer_setLoopCallback(Cranked *cranked, FilePlayer_32 * player, cref_t callback, void * userdata);
++int32 playdate_sound_fileplayer_didUnderrun(Cranked *cranked, FilePlayer_32 * player);
 +void playdate_sound_fileplayer_setFinishCallback(Cranked *cranked, FilePlayer_32 * player, cref_t callback, cref_t userdata);
 +void playdate_sound_fileplayer_setLoopCallback(Cranked *cranked, FilePlayer_32 * player, cref_t callback, cref_t userdata);
  float playdate_sound_fileplayer_getOffset(Cranked *cranked, FilePlayer_32 * player);
  float playdate_sound_fileplayer_getRate(Cranked *cranked, FilePlayer_32 * player);
- void playdate_sound_fileplayer_setStopOnUnderrun(Cranked *cranked, FilePlayer_32 * player, int32_t flag);
+-void playdate_sound_fileplayer_setStopOnUnderrun(Cranked *cranked, FilePlayer_32 * player, int32_t flag);
 -void playdate_sound_fileplayer_fadeVolume(Cranked *cranked, FilePlayer_32 * player, float left, float right, int32_t len, cref_t finishCallback, void * userdata);
 -void playdate_sound_fileplayer_setMP3StreamSource(Cranked *cranked, FilePlayer_32 * player, cref_t dataSource, void * userdata, float bufferLen);
-+void playdate_sound_fileplayer_fadeVolume(Cranked *cranked, FilePlayer_32 * player, float left, float right, int32_t len, cref_t finishCallback, cref_t userdata);
++void playdate_sound_fileplayer_setStopOnUnderrun(Cranked *cranked, FilePlayer_32 * player, int32 flag);
++void playdate_sound_fileplayer_fadeVolume(Cranked *cranked, FilePlayer_32 * player, float left, float right, int32 len, cref_t finishCallback, cref_t userdata);
 +void playdate_sound_fileplayer_setMP3StreamSource(Cranked *cranked, FilePlayer_32 * player, cref_t dataSource, cref_t userdata, float bufferLen);
  void playdate_sound_fileplayer_setRateModulator(Cranked *cranked, FilePlayer_32 * player, PDSynthSignalValue_32 * mod);
  PDSynthSignalValue_32 * playdate_sound_fileplayer_getRateModulator(Cranked *cranked, FilePlayer_32 * player);
- AudioSample_32 * playdate_sound_sample_newSampleBuffer(Cranked *cranked, int32_t byteCount);
-@@ -1223,8 +1223,8 @@ float playdate_sound_sampleplayer_getLength(Cranked *cranked, SamplePlayer_32 *
+-AudioSample_32 * playdate_sound_sample_newSampleBuffer(Cranked *cranked, int32_t byteCount);
+-int32_t playdate_sound_sample_loadIntoSample(Cranked *cranked, AudioSample_32 * sample, uint8_t * path);
++AudioSample_32 * playdate_sound_sample_newSampleBuffer(Cranked *cranked, int32 byteCount);
++int32 playdate_sound_sample_loadIntoSample(Cranked *cranked, AudioSample_32 * sample, uint8_t * path);
+ AudioSample_32 * playdate_sound_sample_load(Cranked *cranked, uint8_t * path);
+-AudioSample_32 * playdate_sound_sample_newSampleFromData(Cranked *cranked, uint8_t * data, int32_t format, uint32_t sampleRate, int32_t byteCount, int32_t shouldFreeData);
+-void playdate_sound_sample_getData(Cranked *cranked, AudioSample_32 * sample, cref_t * data, int32_t * format, uint32_t * sampleRate, uint32_t * bytelength);
++AudioSample_32 * playdate_sound_sample_newSampleFromData(Cranked *cranked, uint8_t * data, int32 format, uint32 sampleRate, int32 byteCount, int32 shouldFreeData);
++void playdate_sound_sample_getData(Cranked *cranked, AudioSample_32 * sample, cref_t * data, int32 * format, uint32 * sampleRate, uint32 * bytelength);
+ void playdate_sound_sample_freeSample(Cranked *cranked, AudioSample_32 * sample);
+ float playdate_sound_sample_getLength(Cranked *cranked, AudioSample_32 * sample);
+-int32_t playdate_sound_sample_decompress(Cranked *cranked, AudioSample_32 * sample);
++int32 playdate_sound_sample_decompress(Cranked *cranked, AudioSample_32 * sample);
+ SamplePlayer_32 * playdate_sound_sampleplayer_newPlayer(Cranked *cranked);
+ void playdate_sound_sampleplayer_freePlayer(Cranked *cranked, SamplePlayer_32 * player);
+ void playdate_sound_sampleplayer_setSample(Cranked *cranked, SamplePlayer_32 * player, AudioSample_32 * sample);
+-int32_t playdate_sound_sampleplayer_play(Cranked *cranked, SamplePlayer_32 * player, int32_t repeat, float rate);
+-int32_t playdate_sound_sampleplayer_isPlaying(Cranked *cranked, SamplePlayer_32 * player);
++int32 playdate_sound_sampleplayer_play(Cranked *cranked, SamplePlayer_32 * player, int32 repeat, float rate);
++int32 playdate_sound_sampleplayer_isPlaying(Cranked *cranked, SamplePlayer_32 * player);
+ void playdate_sound_sampleplayer_stop(Cranked *cranked, SamplePlayer_32 * player);
+ void playdate_sound_sampleplayer_setVolume(Cranked *cranked, SamplePlayer_32 * player, float left, float right);
+ void playdate_sound_sampleplayer_getVolume(Cranked *cranked, SamplePlayer_32 * player, float * left, float * right);
+ float playdate_sound_sampleplayer_getLength(Cranked *cranked, SamplePlayer_32 * player);
  void playdate_sound_sampleplayer_setOffset(Cranked *cranked, SamplePlayer_32 * player, float offset);
  void playdate_sound_sampleplayer_setRate(Cranked *cranked, SamplePlayer_32 * player, float rate);
- void playdate_sound_sampleplayer_setPlayRange(Cranked *cranked, SamplePlayer_32 * player, int32_t start, int32_t end);
+-void playdate_sound_sampleplayer_setPlayRange(Cranked *cranked, SamplePlayer_32 * player, int32_t start, int32_t end);
 -void playdate_sound_sampleplayer_setFinishCallback(Cranked *cranked, SamplePlayer_32 * player, cref_t callback, void * userdata);
 -void playdate_sound_sampleplayer_setLoopCallback(Cranked *cranked, SamplePlayer_32 * player, cref_t callback, void * userdata);
++void playdate_sound_sampleplayer_setPlayRange(Cranked *cranked, SamplePlayer_32 * player, int32 start, int32 end);
 +void playdate_sound_sampleplayer_setFinishCallback(Cranked *cranked, SamplePlayer_32 * player, cref_t callback, cref_t userdata);
 +void playdate_sound_sampleplayer_setLoopCallback(Cranked *cranked, SamplePlayer_32 * player, cref_t callback, cref_t userdata);
  float playdate_sound_sampleplayer_getOffset(Cranked *cranked, SamplePlayer_32 * player);
  float playdate_sound_sampleplayer_getRate(Cranked *cranked, SamplePlayer_32 * player);
- void playdate_sound_sampleplayer_setPaused(Cranked *cranked, SamplePlayer_32 * player, int32_t flag);
-@@ -1233,7 +1233,7 @@ PDSynthSignalValue_32 * playdate_sound_sampleplayer_getRateModulator(Cranked *cr
+-void playdate_sound_sampleplayer_setPaused(Cranked *cranked, SamplePlayer_32 * player, int32_t flag);
++void playdate_sound_sampleplayer_setPaused(Cranked *cranked, SamplePlayer_32 * player, int32 flag);
+ void playdate_sound_sampleplayer_setRateModulator(Cranked *cranked, SamplePlayer_32 * player, PDSynthSignalValue_32 * mod);
+ PDSynthSignalValue_32 * playdate_sound_sampleplayer_getRateModulator(Cranked *cranked, SamplePlayer_32 * player);
  PDSynth_32 * playdate_sound_synth_newSynth(Cranked *cranked);
  void playdate_sound_synth_freeSynth(Cranked *cranked, PDSynth_32 * synth);
- void playdate_sound_synth_setWaveform(Cranked *cranked, PDSynth_32 * synth, int32_t wave);
+-void playdate_sound_synth_setWaveform(Cranked *cranked, PDSynth_32 * synth, int32_t wave);
 -void playdate_sound_synth_setGenerator_deprecated(Cranked *cranked, PDSynth_32 * synth, int32_t stereo, cref_t render, cref_t noteOn, cref_t release, cref_t setparam, cref_t dealloc, void * userdata);
-+void playdate_sound_synth_setGenerator_deprecated(Cranked *cranked, PDSynth_32 * synth, int32_t stereo, cref_t render, cref_t noteOn, cref_t release, cref_t setparam, cref_t dealloc, cref_t userdata);
- void playdate_sound_synth_setSample(Cranked *cranked, PDSynth_32 * synth, AudioSample_32 * sample, uint32_t sustainStart, uint32_t sustainEnd);
+-void playdate_sound_synth_setSample(Cranked *cranked, PDSynth_32 * synth, AudioSample_32 * sample, uint32_t sustainStart, uint32_t sustainEnd);
++void playdate_sound_synth_setWaveform(Cranked *cranked, PDSynth_32 * synth, int32 wave);
++void playdate_sound_synth_setGenerator_deprecated(Cranked *cranked, PDSynth_32 * synth, int32 stereo, cref_t render, cref_t noteOn, cref_t release, cref_t setparam, cref_t dealloc, cref_t userdata);
++void playdate_sound_synth_setSample(Cranked *cranked, PDSynth_32 * synth, AudioSample_32 * sample, uint32 sustainStart, uint32 sustainEnd);
  void playdate_sound_synth_setAttackTime(Cranked *cranked, PDSynth_32 * synth, float attack);
  void playdate_sound_synth_setDecayTime(Cranked *cranked, PDSynth_32 * synth, float decay);
-@@ -1257,7 +1257,7 @@ void playdate_sound_synth_getVolume(Cranked *cranked, PDSynth_32 * synth, float
- int32_t playdate_sound_synth_isPlaying(Cranked *cranked, PDSynth_32 * synth);
+ void playdate_sound_synth_setSustainLevel(Cranked *cranked, PDSynth_32 * synth, float sustain);
+@@ -1244,53 +1244,53 @@ void playdate_sound_synth_setFrequencyModulator(Cranked *cranked, PDSynth_32 * s
+ PDSynthSignalValue_32 * playdate_sound_synth_getFrequencyModulator(Cranked *cranked, PDSynth_32 * synth);
+ void playdate_sound_synth_setAmplitudeModulator(Cranked *cranked, PDSynth_32 * synth, PDSynthSignalValue_32 * mod);
+ PDSynthSignalValue_32 * playdate_sound_synth_getAmplitudeModulator(Cranked *cranked, PDSynth_32 * synth);
+-int32_t playdate_sound_synth_getParameterCount(Cranked *cranked, PDSynth_32 * synth);
+-int32_t playdate_sound_synth_setParameter(Cranked *cranked, PDSynth_32 * synth, int32_t parameter, float value);
+-void playdate_sound_synth_setParameterModulator(Cranked *cranked, PDSynth_32 * synth, int32_t parameter, PDSynthSignalValue_32 * mod);
+-PDSynthSignalValue_32 * playdate_sound_synth_getParameterModulator(Cranked *cranked, PDSynth_32 * synth, int32_t parameter);
+-void playdate_sound_synth_playNote(Cranked *cranked, PDSynth_32 * synth, float freq, float vel, float len, uint32_t when);
+-void playdate_sound_synth_playMIDINote(Cranked *cranked, PDSynth_32 * synth, float note, float vel, float len, uint32_t when);
+-void playdate_sound_synth_noteOff(Cranked *cranked, PDSynth_32 * synth, uint32_t when);
++int32 playdate_sound_synth_getParameterCount(Cranked *cranked, PDSynth_32 * synth);
++int32 playdate_sound_synth_setParameter(Cranked *cranked, PDSynth_32 * synth, int32 parameter, float value);
++void playdate_sound_synth_setParameterModulator(Cranked *cranked, PDSynth_32 * synth, int32 parameter, PDSynthSignalValue_32 * mod);
++PDSynthSignalValue_32 * playdate_sound_synth_getParameterModulator(Cranked *cranked, PDSynth_32 * synth, int32 parameter);
++void playdate_sound_synth_playNote(Cranked *cranked, PDSynth_32 * synth, float freq, float vel, float len, uint32 when);
++void playdate_sound_synth_playMIDINote(Cranked *cranked, PDSynth_32 * synth, float note, float vel, float len, uint32 when);
++void playdate_sound_synth_noteOff(Cranked *cranked, PDSynth_32 * synth, uint32 when);
+ void playdate_sound_synth_stop(Cranked *cranked, PDSynth_32 * synth);
+ void playdate_sound_synth_setVolume(Cranked *cranked, PDSynth_32 * synth, float left, float right);
+ void playdate_sound_synth_getVolume(Cranked *cranked, PDSynth_32 * synth, float * left, float * right);
+-int32_t playdate_sound_synth_isPlaying(Cranked *cranked, PDSynth_32 * synth);
++int32 playdate_sound_synth_isPlaying(Cranked *cranked, PDSynth_32 * synth);
  PDSynthEnvelope_32 * playdate_sound_synth_getEnvelope(Cranked *cranked, PDSynth_32 * synth);
- int32_t playdate_sound_synth_setWavetable(Cranked *cranked, PDSynth_32 * synth, AudioSample_32 * sample, int32_t log2size, int32_t columns, int32_t rows);
+-int32_t playdate_sound_synth_setWavetable(Cranked *cranked, PDSynth_32 * synth, AudioSample_32 * sample, int32_t log2size, int32_t columns, int32_t rows);
 -void playdate_sound_synth_setGenerator(Cranked *cranked, PDSynth_32 * synth, int32_t stereo, cref_t render, cref_t noteOn, cref_t release, cref_t setparam, cref_t dealloc, cref_t copyUserdata, void * userdata);
-+void playdate_sound_synth_setGenerator(Cranked *cranked, PDSynth_32 * synth, int32_t stereo, cref_t render, cref_t noteOn, cref_t release, cref_t setparam, cref_t dealloc, cref_t copyUserdata, cref_t userdata);
++int32 playdate_sound_synth_setWavetable(Cranked *cranked, PDSynth_32 * synth, AudioSample_32 * sample, int32 log2size, int32 columns, int32 rows);
++void playdate_sound_synth_setGenerator(Cranked *cranked, PDSynth_32 * synth, int32 stereo, cref_t render, cref_t noteOn, cref_t release, cref_t setparam, cref_t dealloc, cref_t copyUserdata, cref_t userdata);
  PDSynth_32 * playdate_sound_synth_copy(Cranked *cranked, PDSynth_32 * synth);
  void playdate_sound_synth_clearEnvelope(Cranked *cranked, PDSynth_32 * synth);
  SoundSequence_32 * playdate_sound_sequence_newSequence(Cranked *cranked);
-@@ -1276,18 +1276,18 @@ void playdate_sound_sequence_setTrackAtIndex(Cranked *cranked, SoundSequence_32
+ void playdate_sound_sequence_freeSequence(Cranked *cranked, SoundSequence_32 * sequence);
+-int32_t playdate_sound_sequence_loadMIDIFile(Cranked *cranked, SoundSequence_32 * seq, uint8_t * path);
+-uint32_t playdate_sound_sequence_getTime(Cranked *cranked, SoundSequence_32 * seq);
+-void playdate_sound_sequence_setTime(Cranked *cranked, SoundSequence_32 * seq, uint32_t time);
+-void playdate_sound_sequence_setLoops(Cranked *cranked, SoundSequence_32 * seq, int32_t loopstart, int32_t loopend, int32_t loops);
+-int32_t playdate_sound_sequence_getTempo_deprecated(Cranked *cranked, SoundSequence_32 * seq);
++int32 playdate_sound_sequence_loadMIDIFile(Cranked *cranked, SoundSequence_32 * seq, uint8_t * path);
++uint32 playdate_sound_sequence_getTime(Cranked *cranked, SoundSequence_32 * seq);
++void playdate_sound_sequence_setTime(Cranked *cranked, SoundSequence_32 * seq, uint32 time);
++void playdate_sound_sequence_setLoops(Cranked *cranked, SoundSequence_32 * seq, int32 loopstart, int32 loopend, int32 loops);
++int32 playdate_sound_sequence_getTempo_deprecated(Cranked *cranked, SoundSequence_32 * seq);
+ void playdate_sound_sequence_setTempo(Cranked *cranked, SoundSequence_32 * seq, float stepsPerSecond);
+-void playdate_sound_sequence_setTempo_int(Cranked *cranked, SoundSequence_32 * sequence, int32_t stepsPerSecond);
+-int32_t playdate_sound_sequence_getTrackCount(Cranked *cranked, SoundSequence_32 * seq);
++void playdate_sound_sequence_setTempo_int(Cranked *cranked, SoundSequence_32 * sequence, int32 stepsPerSecond);
++int32 playdate_sound_sequence_getTrackCount(Cranked *cranked, SoundSequence_32 * seq);
+ SequenceTrack_32 * playdate_sound_sequence_addTrack(Cranked *cranked, SoundSequence_32 * seq);
+-SequenceTrack_32 * playdate_sound_sequence_getTrackAtIndex(Cranked *cranked, SoundSequence_32 * seq, uint32_t track);
+-void playdate_sound_sequence_setTrackAtIndex(Cranked *cranked, SoundSequence_32 * seq, SequenceTrack_32 * track, uint32_t idx);
++SequenceTrack_32 * playdate_sound_sequence_getTrackAtIndex(Cranked *cranked, SoundSequence_32 * seq, uint32 track);
++void playdate_sound_sequence_setTrackAtIndex(Cranked *cranked, SoundSequence_32 * seq, SequenceTrack_32 * track, uint32 idx);
  void playdate_sound_sequence_allNotesOff(Cranked *cranked, SoundSequence_32 * seq);
- int32_t playdate_sound_sequence_isPlaying(Cranked *cranked, SoundSequence_32 * seq);
- uint32_t playdate_sound_sequence_getLength(Cranked *cranked, SoundSequence_32 * seq);
+-int32_t playdate_sound_sequence_isPlaying(Cranked *cranked, SoundSequence_32 * seq);
+-uint32_t playdate_sound_sequence_getLength(Cranked *cranked, SoundSequence_32 * seq);
 -void playdate_sound_sequence_play(Cranked *cranked, SoundSequence_32 * seq, cref_t finishCallback, void * userdata);
++int32 playdate_sound_sequence_isPlaying(Cranked *cranked, SoundSequence_32 * seq);
++uint32 playdate_sound_sequence_getLength(Cranked *cranked, SoundSequence_32 * seq);
 +void playdate_sound_sequence_play(Cranked *cranked, SoundSequence_32 * seq, cref_t finishCallback, cref_t userdata);
  void playdate_sound_sequence_stop(Cranked *cranked, SoundSequence_32 * seq);
- int32_t playdate_sound_sequence_getCurrentStep(Cranked *cranked, SoundSequence_32 * seq, int32_t * timeOffset);
- void playdate_sound_sequence_setCurrentStep(Cranked *cranked, SoundSequence_32 * seq, int32_t step, int32_t timeOffset, int32_t playNotes);
+-int32_t playdate_sound_sequence_getCurrentStep(Cranked *cranked, SoundSequence_32 * seq, int32_t * timeOffset);
+-void playdate_sound_sequence_setCurrentStep(Cranked *cranked, SoundSequence_32 * seq, int32_t step, int32_t timeOffset, int32_t playNotes);
++int32 playdate_sound_sequence_getCurrentStep(Cranked *cranked, SoundSequence_32 * seq, int32 * timeOffset);
++void playdate_sound_sequence_setCurrentStep(Cranked *cranked, SoundSequence_32 * seq, int32 step, int32 timeOffset, int32 playNotes);
  float playdate_sound_sequence_getTempo(Cranked *cranked, SoundSequence_32 * seq);
 -SoundEffect_32 * playdate_sound_effect_newEffect(Cranked *cranked, cref_t proc, void * userdata);
 +SoundEffect_32 * playdate_sound_effect_newEffect(Cranked *cranked, cref_t proc, cref_t userdata);
@@ -25494,40 +26212,151 @@ index ffa4936..7858603 100644
 +cref_t playdate_sound_effect_getUserdata(Cranked *cranked, SoundEffect_32 * effect);
  TwoPoleFilter_32 * playdate_sound_effect_twopolefilter_newFilter(Cranked *cranked);
  void playdate_sound_effect_twopolefilter_freeFilter(Cranked *cranked, TwoPoleFilter_32 * filter);
- void playdate_sound_effect_twopolefilter_setType(Cranked *cranked, TwoPoleFilter_32 * filter, int32_t type);
-@@ -1350,7 +1350,7 @@ void playdate_sound_lfo_setPhase(Cranked *cranked, PDSynthLFO_32 * lfo, float ph
+-void playdate_sound_effect_twopolefilter_setType(Cranked *cranked, TwoPoleFilter_32 * filter, int32_t type);
++void playdate_sound_effect_twopolefilter_setType(Cranked *cranked, TwoPoleFilter_32 * filter, int32 type);
+ void playdate_sound_effect_twopolefilter_setFrequency(Cranked *cranked, TwoPoleFilter_32 * filter, float frequency);
+ void playdate_sound_effect_twopolefilter_setFrequencyModulator(Cranked *cranked, TwoPoleFilter_32 * filter, PDSynthSignalValue_32 * signal);
+ PDSynthSignalValue_32 * playdate_sound_effect_twopolefilter_getFrequencyModulator(Cranked *cranked, TwoPoleFilter_32 * filter);
+@@ -1323,16 +1323,16 @@ void playdate_sound_effect_ringmodulator_freeRingmod(Cranked *cranked, RingModul
+ void playdate_sound_effect_ringmodulator_setFrequency(Cranked *cranked, RingModulator_32 * filter, float frequency);
+ void playdate_sound_effect_ringmodulator_setFrequencyModulator(Cranked *cranked, RingModulator_32 * filter, PDSynthSignalValue_32 * signal);
+ PDSynthSignalValue_32 * playdate_sound_effect_ringmodulator_getFrequencyModulator(Cranked *cranked, RingModulator_32 * filter);
+-DelayLine_32 * playdate_sound_effect_delayline_newDelayLine(Cranked *cranked, int32_t length, int32_t stereo);
++DelayLine_32 * playdate_sound_effect_delayline_newDelayLine(Cranked *cranked, int32 length, int32 stereo);
+ void playdate_sound_effect_delayline_freeDelayLine(Cranked *cranked, DelayLine_32 * filter);
+-void playdate_sound_effect_delayline_setLength(Cranked *cranked, DelayLine_32 * d, int32_t frames);
++void playdate_sound_effect_delayline_setLength(Cranked *cranked, DelayLine_32 * d, int32 frames);
+ void playdate_sound_effect_delayline_setFeedback(Cranked *cranked, DelayLine_32 * d, float fb);
+-DelayLineTap_32 * playdate_sound_effect_delayline_addTap(Cranked *cranked, DelayLine_32 * d, int32_t delay);
++DelayLineTap_32 * playdate_sound_effect_delayline_addTap(Cranked *cranked, DelayLine_32 * d, int32 delay);
+ void playdate_sound_effect_delayline_freeTap(Cranked *cranked, DelayLineTap_32 * tap);
+-void playdate_sound_effect_delayline_setTapDelay(Cranked *cranked, DelayLineTap_32 * t, int32_t frames);
++void playdate_sound_effect_delayline_setTapDelay(Cranked *cranked, DelayLineTap_32 * t, int32 frames);
+ void playdate_sound_effect_delayline_setTapDelayModulator(Cranked *cranked, DelayLineTap_32 * t, PDSynthSignalValue_32 * mod);
+ PDSynthSignalValue_32 * playdate_sound_effect_delayline_getTapDelayModulator(Cranked *cranked, DelayLineTap_32 * t);
+-void playdate_sound_effect_delayline_setTapChannelsFlipped(Cranked *cranked, DelayLineTap_32 * t, int32_t flip);
++void playdate_sound_effect_delayline_setTapChannelsFlipped(Cranked *cranked, DelayLineTap_32 * t, int32 flip);
+ Overdrive_32 * playdate_sound_effect_overdrive_newOverdrive(Cranked *cranked);
+ void playdate_sound_effect_overdrive_freeOverdrive(Cranked *cranked, Overdrive_32 * filter);
+ void playdate_sound_effect_overdrive_setGain(Cranked *cranked, Overdrive_32 * o, float gain);
+@@ -1342,19 +1342,19 @@ PDSynthSignalValue_32 * playdate_sound_effect_overdrive_getLimitModulator(Cranke
+ void playdate_sound_effect_overdrive_setOffset(Cranked *cranked, Overdrive_32 * o, float offset);
+ void playdate_sound_effect_overdrive_setOffsetModulator(Cranked *cranked, Overdrive_32 * o, PDSynthSignalValue_32 * mod);
+ PDSynthSignalValue_32 * playdate_sound_effect_overdrive_getOffsetModulator(Cranked *cranked, Overdrive_32 * o);
+-PDSynthLFO_32 * playdate_sound_lfo_newLFO(Cranked *cranked, int32_t type);
++PDSynthLFO_32 * playdate_sound_lfo_newLFO(Cranked *cranked, int32 type);
+ void playdate_sound_lfo_freeLFO(Cranked *cranked, PDSynthLFO_32 * lfo);
+-void playdate_sound_lfo_setType(Cranked *cranked, PDSynthLFO_32 * lfo, int32_t type);
++void playdate_sound_lfo_setType(Cranked *cranked, PDSynthLFO_32 * lfo, int32 type);
+ void playdate_sound_lfo_setRate(Cranked *cranked, PDSynthLFO_32 * lfo, float rate);
+ void playdate_sound_lfo_setPhase(Cranked *cranked, PDSynthLFO_32 * lfo, float phase);
  void playdate_sound_lfo_setCenter(Cranked *cranked, PDSynthLFO_32 * lfo, float center);
  void playdate_sound_lfo_setDepth(Cranked *cranked, PDSynthLFO_32 * lfo, float depth);
- void playdate_sound_lfo_setArpeggiation(Cranked *cranked, PDSynthLFO_32 * lfo, int32_t nSteps, float * steps);
+-void playdate_sound_lfo_setArpeggiation(Cranked *cranked, PDSynthLFO_32 * lfo, int32_t nSteps, float * steps);
 -void playdate_sound_lfo_setFunction(Cranked *cranked, PDSynthLFO_32 * lfo, cref_t lfoFunc, void * userdata, int32_t interpolate);
-+void playdate_sound_lfo_setFunction(Cranked *cranked, PDSynthLFO_32 * lfo, cref_t lfoFunc, cref_t userdata, int32_t interpolate);
++void playdate_sound_lfo_setArpeggiation(Cranked *cranked, PDSynthLFO_32 * lfo, int32 nSteps, float * steps);
++void playdate_sound_lfo_setFunction(Cranked *cranked, PDSynthLFO_32 * lfo, cref_t lfoFunc, cref_t userdata, int32 interpolate);
  void playdate_sound_lfo_setDelay(Cranked *cranked, PDSynthLFO_32 * lfo, float holdoff, float ramptime);
- void playdate_sound_lfo_setRetrigger(Cranked *cranked, PDSynthLFO_32 * lfo, int32_t flag);
+-void playdate_sound_lfo_setRetrigger(Cranked *cranked, PDSynthLFO_32 * lfo, int32_t flag);
++void playdate_sound_lfo_setRetrigger(Cranked *cranked, PDSynthLFO_32 * lfo, int32 flag);
  float playdate_sound_lfo_getValue(Cranked *cranked, PDSynthLFO_32 * lfo);
-@@ -1372,7 +1372,7 @@ void playdate_sound_envelope_setRateScaling(Cranked *cranked, PDSynthEnvelope_32
+-void playdate_sound_lfo_setGlobal(Cranked *cranked, PDSynthLFO_32 * lfo, int32_t global);
++void playdate_sound_lfo_setGlobal(Cranked *cranked, PDSynthLFO_32 * lfo, int32 global);
+ void playdate_sound_lfo_setStartPhase(Cranked *cranked, PDSynthLFO_32 * lfo, float phase);
+ void playdate_sound_lfo_setRandomSeed(Cranked *cranked, PDSynthLFO_32 * lfo, uint16_t value);
+ PDSynthEnvelope_32 * playdate_sound_envelope_newEnvelope(Cranked *cranked, float attack, float decay, float sustain, float release);
+@@ -1363,166 +1363,166 @@ void playdate_sound_envelope_setAttack(Cranked *cranked, PDSynthEnvelope_32 * en
+ void playdate_sound_envelope_setDecay(Cranked *cranked, PDSynthEnvelope_32 * env, float decay);
+ void playdate_sound_envelope_setSustain(Cranked *cranked, PDSynthEnvelope_32 * env, float sustain);
+ void playdate_sound_envelope_setRelease(Cranked *cranked, PDSynthEnvelope_32 * env, float release);
+-void playdate_sound_envelope_setLegato(Cranked *cranked, PDSynthEnvelope_32 * env, int32_t flag);
+-void playdate_sound_envelope_setRetrigger(Cranked *cranked, PDSynthEnvelope_32 * lfo, int32_t flag);
++void playdate_sound_envelope_setLegato(Cranked *cranked, PDSynthEnvelope_32 * env, int32 flag);
++void playdate_sound_envelope_setRetrigger(Cranked *cranked, PDSynthEnvelope_32 * lfo, int32 flag);
+ float playdate_sound_envelope_getValue(Cranked *cranked, PDSynthEnvelope_32 * env);
+ void playdate_sound_envelope_setCurvature(Cranked *cranked, PDSynthEnvelope_32 * env, float amount);
+ void playdate_sound_envelope_setVelocitySensitivity(Cranked *cranked, PDSynthEnvelope_32 * env, float velsens);
+ void playdate_sound_envelope_setRateScaling(Cranked *cranked, PDSynthEnvelope_32 * env, float scaling, float start, float end);
  void playdate_sound_source_setVolume(Cranked *cranked, SoundSource_32 * c, float lvol, float rvol);
  void playdate_sound_source_getVolume(Cranked *cranked, SoundSource_32 * c, float * outl, float * outr);
- int32_t playdate_sound_source_isPlaying(Cranked *cranked, SoundSource_32 * c);
+-int32_t playdate_sound_source_isPlaying(Cranked *cranked, SoundSource_32 * c);
 -void playdate_sound_source_setFinishCallback(Cranked *cranked, SoundSource_32 * c, cref_t callback, void * userdata);
++int32 playdate_sound_source_isPlaying(Cranked *cranked, SoundSource_32 * c);
 +void playdate_sound_source_setFinishCallback(Cranked *cranked, SoundSource_32 * c, cref_t callback, cref_t userdata);
  ControlSignal_32 * playdate_control_signal_newSignal(Cranked *cranked);
  void playdate_control_signal_freeSignal(Cranked *cranked, ControlSignal_32 * signal);
  void playdate_control_signal_clearEvents(Cranked *cranked, ControlSignal_32 * control);
-@@ -1410,22 +1410,22 @@ void playdate_sound_instrument_setVolume(Cranked *cranked, PDSynthInstrument_32
+-void playdate_control_signal_addEvent(Cranked *cranked, ControlSignal_32 * control, int32_t step, float value, int32_t interpolate);
+-void playdate_control_signal_removeEvent(Cranked *cranked, ControlSignal_32 * control, int32_t step);
+-int32_t playdate_control_signal_getMIDIControllerNumber(Cranked *cranked, ControlSignal_32 * control);
++void playdate_control_signal_addEvent(Cranked *cranked, ControlSignal_32 * control, int32 step, float value, int32 interpolate);
++void playdate_control_signal_removeEvent(Cranked *cranked, ControlSignal_32 * control, int32 step);
++int32 playdate_control_signal_getMIDIControllerNumber(Cranked *cranked, ControlSignal_32 * control);
+ SequenceTrack_32 * playdate_sound_track_newTrack(Cranked *cranked);
+ void playdate_sound_track_freeTrack(Cranked *cranked, SequenceTrack_32 * track);
+ void playdate_sound_track_setInstrument(Cranked *cranked, SequenceTrack_32 * track, PDSynthInstrument_32 * inst);
+ PDSynthInstrument_32 * playdate_sound_track_getInstrument(Cranked *cranked, SequenceTrack_32 * track);
+-void playdate_sound_track_addNoteEvent(Cranked *cranked, SequenceTrack_32 * track, uint32_t step, uint32_t len, float note, float velocity);
+-void playdate_sound_track_removeNoteEvent(Cranked *cranked, SequenceTrack_32 * track, uint32_t step, float note);
++void playdate_sound_track_addNoteEvent(Cranked *cranked, SequenceTrack_32 * track, uint32 step, uint32 len, float note, float velocity);
++void playdate_sound_track_removeNoteEvent(Cranked *cranked, SequenceTrack_32 * track, uint32 step, float note);
+ void playdate_sound_track_clearNotes(Cranked *cranked, SequenceTrack_32 * track);
+-int32_t playdate_sound_track_getControlSignalCount(Cranked *cranked, SequenceTrack_32 * track);
+-ControlSignal_32 * playdate_sound_track_getControlSignal(Cranked *cranked, SequenceTrack_32 * track, int32_t idx);
++int32 playdate_sound_track_getControlSignalCount(Cranked *cranked, SequenceTrack_32 * track);
++ControlSignal_32 * playdate_sound_track_getControlSignal(Cranked *cranked, SequenceTrack_32 * track, int32 idx);
+ void playdate_sound_track_clearControlEvents(Cranked *cranked, SequenceTrack_32 * track);
+-int32_t playdate_sound_track_getPolyphony(Cranked *cranked, SequenceTrack_32 * track);
+-int32_t playdate_sound_track_activeVoiceCount(Cranked *cranked, SequenceTrack_32 * track);
+-void playdate_sound_track_setMuted(Cranked *cranked, SequenceTrack_32 * track, int32_t mute);
+-uint32_t playdate_sound_track_getLength(Cranked *cranked, SequenceTrack_32 * track);
+-int32_t playdate_sound_track_getIndexForStep(Cranked *cranked, SequenceTrack_32 * track, uint32_t step);
+-int32_t playdate_sound_track_getNoteAtIndex(Cranked *cranked, SequenceTrack_32 * track, int32_t index, uint32_t * outStep, uint32_t * outLen, float * outNote, float * outVelocity);
+-ControlSignal_32 * playdate_sound_track_getSignalForController(Cranked *cranked, SequenceTrack_32 * track, int32_t controller, int32_t create);
++int32 playdate_sound_track_getPolyphony(Cranked *cranked, SequenceTrack_32 * track);
++int32 playdate_sound_track_activeVoiceCount(Cranked *cranked, SequenceTrack_32 * track);
++void playdate_sound_track_setMuted(Cranked *cranked, SequenceTrack_32 * track, int32 mute);
++uint32 playdate_sound_track_getLength(Cranked *cranked, SequenceTrack_32 * track);
++int32 playdate_sound_track_getIndexForStep(Cranked *cranked, SequenceTrack_32 * track, uint32 step);
++int32 playdate_sound_track_getNoteAtIndex(Cranked *cranked, SequenceTrack_32 * track, int32 index, uint32 * outStep, uint32 * outLen, float * outNote, float * outVelocity);
++ControlSignal_32 * playdate_sound_track_getSignalForController(Cranked *cranked, SequenceTrack_32 * track, int32 controller, int32 create);
+ PDSynthInstrument_32 * playdate_sound_instrument_newInstrument(Cranked *cranked);
+ void playdate_sound_instrument_freeInstrument(Cranked *cranked, PDSynthInstrument_32 * inst);
+-int32_t playdate_sound_instrument_addVoice(Cranked *cranked, PDSynthInstrument_32 * inst, PDSynth_32 * synth, float rangeStart, float rangeEnd, float transpose);
+-PDSynth_32 * playdate_sound_instrument_playNote(Cranked *cranked, PDSynthInstrument_32 * inst, float frequency, float vel, float len, uint32_t when);
+-PDSynth_32 * playdate_sound_instrument_playMIDINote(Cranked *cranked, PDSynthInstrument_32 * inst, float note, float vel, float len, uint32_t when);
++int32 playdate_sound_instrument_addVoice(Cranked *cranked, PDSynthInstrument_32 * inst, PDSynth_32 * synth, float rangeStart, float rangeEnd, float transpose);
++PDSynth_32 * playdate_sound_instrument_playNote(Cranked *cranked, PDSynthInstrument_32 * inst, float frequency, float vel, float len, uint32 when);
++PDSynth_32 * playdate_sound_instrument_playMIDINote(Cranked *cranked, PDSynthInstrument_32 * inst, float note, float vel, float len, uint32 when);
+ void playdate_sound_instrument_setPitchBend(Cranked *cranked, PDSynthInstrument_32 * inst, float bend);
+ void playdate_sound_instrument_setPitchBendRange(Cranked *cranked, PDSynthInstrument_32 * inst, float halfSteps);
+ void playdate_sound_instrument_setTranspose(Cranked *cranked, PDSynthInstrument_32 * inst, float halfSteps);
+-void playdate_sound_instrument_noteOff(Cranked *cranked, PDSynthInstrument_32 * inst, float note, uint32_t when);
+-void playdate_sound_instrument_allNotesOff(Cranked *cranked, PDSynthInstrument_32 * inst, uint32_t when);
++void playdate_sound_instrument_noteOff(Cranked *cranked, PDSynthInstrument_32 * inst, float note, uint32 when);
++void playdate_sound_instrument_allNotesOff(Cranked *cranked, PDSynthInstrument_32 * inst, uint32 when);
+ void playdate_sound_instrument_setVolume(Cranked *cranked, PDSynthInstrument_32 * inst, float left, float right);
  void playdate_sound_instrument_getVolume(Cranked *cranked, PDSynthInstrument_32 * inst, float * left, float * right);
- int32_t playdate_sound_instrument_activeVoiceCount(Cranked *cranked, PDSynthInstrument_32 * inst);
- uint32_t playdate_sound_getCurrentTime(Cranked *cranked);
+-int32_t playdate_sound_instrument_activeVoiceCount(Cranked *cranked, PDSynthInstrument_32 * inst);
+-uint32_t playdate_sound_getCurrentTime(Cranked *cranked);
 -SoundSource_32 * playdate_sound_addSource(Cranked *cranked, cref_t callback, void * context, int32_t stereo);
-+SoundSource_32 * playdate_sound_addSource(Cranked *cranked, cref_t callback, cref_t context, int32_t stereo);
++int32 playdate_sound_instrument_activeVoiceCount(Cranked *cranked, PDSynthInstrument_32 * inst);
++uint32 playdate_sound_getCurrentTime(Cranked *cranked);
++SoundSource_32 * playdate_sound_addSource(Cranked *cranked, cref_t callback, cref_t context, int32 stereo);
  SoundChannel_32 * playdate_sound_getDefaultChannel(Cranked *cranked);
- int32_t playdate_sound_addChannel(Cranked *cranked, SoundChannel_32 * channel);
- int32_t playdate_sound_removeChannel(Cranked *cranked, SoundChannel_32 * channel);
+-int32_t playdate_sound_addChannel(Cranked *cranked, SoundChannel_32 * channel);
+-int32_t playdate_sound_removeChannel(Cranked *cranked, SoundChannel_32 * channel);
 -int32_t playdate_sound_setMicCallback(Cranked *cranked, cref_t callback, void * context, int32_t source);
-+int32_t playdate_sound_setMicCallback(Cranked *cranked, cref_t callback, cref_t context, int32_t source);
- void playdate_sound_getHeadphoneState(Cranked *cranked, int32_t * headphone, int32_t * headsetmic, cref_t changeCallback);
- void playdate_sound_setOutputsActive(Cranked *cranked, int32_t headphone, int32_t speaker);
- int32_t playdate_sound_removeSource(Cranked *cranked, SoundSource_32 * source);
+-void playdate_sound_getHeadphoneState(Cranked *cranked, int32_t * headphone, int32_t * headsetmic, cref_t changeCallback);
+-void playdate_sound_setOutputsActive(Cranked *cranked, int32_t headphone, int32_t speaker);
+-int32_t playdate_sound_removeSource(Cranked *cranked, SoundSource_32 * source);
 -PDSynthSignal_32 * playdate_sound_signal_newSignal(Cranked *cranked, cref_t step, cref_t noteOn, cref_t noteOff, cref_t dealloc, void * userdata);
++int32 playdate_sound_addChannel(Cranked *cranked, SoundChannel_32 * channel);
++int32 playdate_sound_removeChannel(Cranked *cranked, SoundChannel_32 * channel);
++int32 playdate_sound_setMicCallback(Cranked *cranked, cref_t callback, cref_t context, int32 source);
++void playdate_sound_getHeadphoneState(Cranked *cranked, int32 * headphone, int32 * headsetmic, cref_t changeCallback);
++void playdate_sound_setOutputsActive(Cranked *cranked, int32 headphone, int32 speaker);
++int32 playdate_sound_removeSource(Cranked *cranked, SoundSource_32 * source);
 +PDSynthSignal_32 * playdate_sound_signal_newSignal(Cranked *cranked, cref_t step, cref_t noteOn, cref_t noteOff, cref_t dealloc, cref_t userdata);
  void playdate_sound_signal_freeSignal(Cranked *cranked, PDSynthSignal_32 * signal);
  float playdate_sound_signal_getValue(Cranked *cranked, PDSynthSignal_32 * signal);
@@ -25536,295 +26365,170 @@ index ffa4936..7858603 100644
  PDSynthSignal_32 * playdate_sound_signal_newSignalForValue(Cranked *cranked, PDSynthSignalValue_32 * value);
  uint8_t * playdate_sound_getError(Cranked *cranked);
 -int32_t playdate_sound_requestMicAccess(Cranked *cranked, uint8_t * purpose, cref_t requestCallback, void * userdata);
-+int32_t playdate_sound_requestMicAccess(Cranked *cranked, uint8_t * purpose, cref_t requestCallback, cref_t userdata);
- int32_t playdate_lua_addFunction(Cranked *cranked, cref_t f, uint8_t * name, cref_t * outErr);
- int32_t playdate_lua_registerClass(Cranked *cranked, uint8_t * name, lua_reg_32 * reg, lua_val_32 * vals, int32_t isstatic, cref_t * outErr);
+-int32_t playdate_lua_addFunction(Cranked *cranked, cref_t f, uint8_t * name, cref_t * outErr);
+-int32_t playdate_lua_registerClass(Cranked *cranked, uint8_t * name, lua_reg_32 * reg, lua_val_32 * vals, int32_t isstatic, cref_t * outErr);
++int32 playdate_sound_requestMicAccess(Cranked *cranked, uint8_t * purpose, cref_t requestCallback, cref_t userdata);
++int32 playdate_lua_addFunction(Cranked *cranked, cref_t f, uint8_t * name, cref_t * outErr);
++int32 playdate_lua_registerClass(Cranked *cranked, uint8_t * name, lua_reg_32 * reg, lua_val_32 * vals, int32 isstatic, cref_t * outErr);
  void playdate_lua_pushFunction(Cranked *cranked, cref_t f);
-@@ -1458,7 +1458,7 @@ void playdate_lua_setUserValue(Cranked *cranked, LuaUDObject_32 * obj, uint32_t
- int32_t playdate_lua_getUserValue(Cranked *cranked, LuaUDObject_32 * obj, uint32_t slot);
- void playdate_lua_callFunction_deprecated(Cranked *cranked, uint8_t * name, int32_t nargs);
- int32_t playdate_lua_callFunction(Cranked *cranked, uint8_t * name, int32_t nargs, cref_t * outerr);
+-int32_t playdate_lua_indexMetatable(Cranked *cranked);
++int32 playdate_lua_indexMetatable(Cranked *cranked);
+ void playdate_lua_stop(Cranked *cranked);
+ void playdate_lua_start(Cranked *cranked);
+-int32_t playdate_lua_getArgCount(Cranked *cranked);
+-int32_t playdate_lua_getArgType(Cranked *cranked, int32_t pos, cref_t * outClass);
+-int32_t playdate_lua_argIsNil(Cranked *cranked, int32_t pos);
+-int32_t playdate_lua_getArgBool(Cranked *cranked, int32_t pos);
+-int32_t playdate_lua_getArgInt(Cranked *cranked, int32_t pos);
+-float playdate_lua_getArgFloat(Cranked *cranked, int32_t pos);
+-uint8_t * playdate_lua_getArgString(Cranked *cranked, int32_t pos);
+-uint8_t * playdate_lua_getArgBytes(Cranked *cranked, int32_t pos, uint32_t * outlen);
+-void * playdate_lua_getArgObject(Cranked *cranked, int32_t pos, uint8_t * type, cref_t * outud);
+-LCDBitmap_32 * playdate_lua_getBitmap(Cranked *cranked, int32_t pos);
+-LCDSprite_32 * playdate_lua_getSprite(Cranked *cranked, int32_t pos);
++int32 playdate_lua_getArgCount(Cranked *cranked);
++int32 playdate_lua_getArgType(Cranked *cranked, int32 pos, cref_t * outClass);
++int32 playdate_lua_argIsNil(Cranked *cranked, int32 pos);
++int32 playdate_lua_getArgBool(Cranked *cranked, int32 pos);
++int32 playdate_lua_getArgInt(Cranked *cranked, int32 pos);
++float playdate_lua_getArgFloat(Cranked *cranked, int32 pos);
++uint8_t * playdate_lua_getArgString(Cranked *cranked, int32 pos);
++uint8_t * playdate_lua_getArgBytes(Cranked *cranked, int32 pos, uint32 * outlen);
++void * playdate_lua_getArgObject(Cranked *cranked, int32 pos, uint8_t * type, cref_t * outud);
++LCDBitmap_32 * playdate_lua_getBitmap(Cranked *cranked, int32 pos);
++LCDSprite_32 * playdate_lua_getSprite(Cranked *cranked, int32 pos);
+ void playdate_lua_pushNil(Cranked *cranked);
+-void playdate_lua_pushBool(Cranked *cranked, int32_t val);
+-void playdate_lua_pushInt(Cranked *cranked, int32_t val);
++void playdate_lua_pushBool(Cranked *cranked, int32 val);
++void playdate_lua_pushInt(Cranked *cranked, int32 val);
+ void playdate_lua_pushFloat(Cranked *cranked, float val);
+ void playdate_lua_pushString(Cranked *cranked, uint8_t * str);
+-void playdate_lua_pushBytes(Cranked *cranked, uint8_t * str, uint32_t len);
++void playdate_lua_pushBytes(Cranked *cranked, uint8_t * str, uint32 len);
+ void playdate_lua_pushBitmap(Cranked *cranked, LCDBitmap_32 * bitmap);
+ void playdate_lua_pushSprite(Cranked *cranked, LCDSprite_32 * sprite);
+-LuaUDObject_32 * playdate_lua_pushObject(Cranked *cranked, void * obj, uint8_t * type, int32_t nValues);
++LuaUDObject_32 * playdate_lua_pushObject(Cranked *cranked, void * obj, uint8_t * type, int32 nValues);
+ LuaUDObject_32 * playdate_lua_retainObject(Cranked *cranked, LuaUDObject_32 * obj);
+ void playdate_lua_releaseObject(Cranked *cranked, LuaUDObject_32 * obj);
+-void playdate_lua_setUserValue(Cranked *cranked, LuaUDObject_32 * obj, uint32_t slot);
+-int32_t playdate_lua_getUserValue(Cranked *cranked, LuaUDObject_32 * obj, uint32_t slot);
+-void playdate_lua_callFunction_deprecated(Cranked *cranked, uint8_t * name, int32_t nargs);
+-int32_t playdate_lua_callFunction(Cranked *cranked, uint8_t * name, int32_t nargs, cref_t * outerr);
 -void playdate_json_initEncoder(Cranked *cranked, json_encoder_32 * encoder, cref_t write, void * userdata, int32_t pretty);
-+void playdate_json_initEncoder(Cranked *cranked, json_encoder_32 * encoder, cref_t write, cref_t userdata, int32_t pretty);
- int32_t playdate_json_decode(Cranked *cranked, json_decoder_32 * functions, json_reader_32 reader, json_value_32 * outval);
- int32_t playdate_json_decodeString(Cranked *cranked, json_decoder_32 * functions, uint8_t * jsonString, json_value_32 * outval);
- int32_t playdate_scoreboards_addScore(Cranked *cranked, uint8_t * boardId, uint32_t value, cref_t callback);
-@@ -1468,15 +1468,15 @@ int32_t playdate_scoreboards_getScoreboards(Cranked *cranked, cref_t callback);
+-int32_t playdate_json_decode(Cranked *cranked, json_decoder_32 * functions, json_reader_32 reader, json_value_32 * outval);
+-int32_t playdate_json_decodeString(Cranked *cranked, json_decoder_32 * functions, uint8_t * jsonString, json_value_32 * outval);
+-int32_t playdate_scoreboards_addScore(Cranked *cranked, uint8_t * boardId, uint32_t value, cref_t callback);
+-int32_t playdate_scoreboards_getPersonalBest(Cranked *cranked, uint8_t * boardId, cref_t callback);
++void playdate_lua_setUserValue(Cranked *cranked, LuaUDObject_32 * obj, uint32 slot);
++int32 playdate_lua_getUserValue(Cranked *cranked, LuaUDObject_32 * obj, uint32 slot);
++void playdate_lua_callFunction_deprecated(Cranked *cranked, uint8_t * name, int32 nargs);
++int32 playdate_lua_callFunction(Cranked *cranked, uint8_t * name, int32 nargs, cref_t * outerr);
++void playdate_json_initEncoder(Cranked *cranked, json_encoder_32 * encoder, cref_t write, cref_t userdata, int32 pretty);
++int32 playdate_json_decode(Cranked *cranked, json_decoder_32 * functions, json_reader_32 reader, json_value_32 * outval);
++int32 playdate_json_decodeString(Cranked *cranked, json_decoder_32 * functions, uint8_t * jsonString, json_value_32 * outval);
++int32 playdate_scoreboards_addScore(Cranked *cranked, uint8_t * boardId, uint32 value, cref_t callback);
++int32 playdate_scoreboards_getPersonalBest(Cranked *cranked, uint8_t * boardId, cref_t callback);
+ void playdate_scoreboards_freeScore(Cranked *cranked, PDScore_32 * score);
+-int32_t playdate_scoreboards_getScoreboards(Cranked *cranked, cref_t callback);
++int32 playdate_scoreboards_getScoreboards(Cranked *cranked, cref_t callback);
  void playdate_scoreboards_freeBoardsList(Cranked *cranked, PDBoardsList_32 * boardsList);
- int32_t playdate_scoreboards_getScores(Cranked *cranked, uint8_t * boardId, cref_t callback);
+-int32_t playdate_scoreboards_getScores(Cranked *cranked, uint8_t * boardId, cref_t callback);
++int32 playdate_scoreboards_getScores(Cranked *cranked, uint8_t * boardId, cref_t callback);
  void playdate_scoreboards_freeScoresList(Cranked *cranked, PDScoresList_32 * scoresList);
 -int32_t playdate_http_requestAccess(Cranked *cranked, uint8_t * server, int32_t port, uint8_t usessl, uint8_t * purpose, cref_t requestCallback, void * userdata);
-+int32_t playdate_http_requestAccess(Cranked *cranked, uint8_t * server, int32_t port, uint8_t usessl, uint8_t * purpose, cref_t requestCallback, cref_t userdata);
- HTTPConnection_32 * playdate_http_newConnection(Cranked *cranked, uint8_t * server, int32_t port, uint8_t usessl);
+-HTTPConnection_32 * playdate_http_newConnection(Cranked *cranked, uint8_t * server, int32_t port, uint8_t usessl);
++int32 playdate_http_requestAccess(Cranked *cranked, uint8_t * server, int32 port, uint8_t usessl, uint8_t * purpose, cref_t requestCallback, cref_t userdata);
++HTTPConnection_32 * playdate_http_newConnection(Cranked *cranked, uint8_t * server, int32 port, uint8_t usessl);
  HTTPConnection_32 * playdate_http_retain(Cranked *cranked, HTTPConnection_32 * http);
  void playdate_http_release(Cranked *cranked, HTTPConnection_32 * http);
- void playdate_http_setConnectTimeout(Cranked *cranked, HTTPConnection_32 * connection, int32_t ms);
+-void playdate_http_setConnectTimeout(Cranked *cranked, HTTPConnection_32 * connection, int32_t ms);
++void playdate_http_setConnectTimeout(Cranked *cranked, HTTPConnection_32 * connection, int32 ms);
  void playdate_http_setKeepAlive(Cranked *cranked, HTTPConnection_32 * connection, uint8_t keepalive);
- void playdate_http_setByteRange(Cranked *cranked, HTTPConnection_32 * connection, int32_t start, int32_t end);
+-void playdate_http_setByteRange(Cranked *cranked, HTTPConnection_32 * connection, int32_t start, int32_t end);
 -void playdate_http_setUserdata(Cranked *cranked, HTTPConnection_32 * connection, void * userdata);
 -void * playdate_http_getUserdata(Cranked *cranked, HTTPConnection_32 * connection);
+-int32_t playdate_http_get(Cranked *cranked, HTTPConnection_32 * conn, uint8_t * path, uint8_t * headers, uint32_t headerlen);
+-int32_t playdate_http_post(Cranked *cranked, HTTPConnection_32 * conn, uint8_t * path, uint8_t * headers, uint32_t headerlen, uint8_t * body, uint32_t bodylen);
+-int32_t playdate_http_query(Cranked *cranked, HTTPConnection_32 * conn, uint8_t * method, uint8_t * path, uint8_t * headers, uint32_t headerlen, uint8_t * body, uint32_t bodylen);
+-int32_t playdate_http_getError(Cranked *cranked, HTTPConnection_32 * connection);
+-void playdate_http_getProgress(Cranked *cranked, HTTPConnection_32 * conn, int32_t * read, int32_t * total);
+-int32_t playdate_http_getResponseStatus(Cranked *cranked, HTTPConnection_32 * connection);
+-uint32_t playdate_http_getBytesAvailable(Cranked *cranked, HTTPConnection_32 * conn);
+-void playdate_http_setReadTimeout(Cranked *cranked, HTTPConnection_32 * conn, int32_t ms);
+-void playdate_http_setReadBufferSize(Cranked *cranked, HTTPConnection_32 * conn, int32_t bytes);
+-int32_t playdate_http_read(Cranked *cranked, HTTPConnection_32 * conn, void * buf, uint32_t buflen);
++void playdate_http_setByteRange(Cranked *cranked, HTTPConnection_32 * connection, int32 start, int32 end);
 +void playdate_http_setUserdata(Cranked *cranked, HTTPConnection_32 * connection, cref_t userdata);
 +cref_t playdate_http_getUserdata(Cranked *cranked, HTTPConnection_32 * connection);
- int32_t playdate_http_get(Cranked *cranked, HTTPConnection_32 * conn, uint8_t * path, uint8_t * headers, uint32_t headerlen);
- int32_t playdate_http_post(Cranked *cranked, HTTPConnection_32 * conn, uint8_t * path, uint8_t * headers, uint32_t headerlen, uint8_t * body, uint32_t bodylen);
- int32_t playdate_http_query(Cranked *cranked, HTTPConnection_32 * conn, uint8_t * method, uint8_t * path, uint8_t * headers, uint32_t headerlen, uint8_t * body, uint32_t bodylen);
-@@ -1493,15 +1493,15 @@ void playdate_http_setHeadersReadCallback(Cranked *cranked, HTTPConnection_32 *
++int32 playdate_http_get(Cranked *cranked, HTTPConnection_32 * conn, uint8_t * path, uint8_t * headers, uint32 headerlen);
++int32 playdate_http_post(Cranked *cranked, HTTPConnection_32 * conn, uint8_t * path, uint8_t * headers, uint32 headerlen, uint8_t * body, uint32 bodylen);
++int32 playdate_http_query(Cranked *cranked, HTTPConnection_32 * conn, uint8_t * method, uint8_t * path, uint8_t * headers, uint32 headerlen, uint8_t * body, uint32 bodylen);
++int32 playdate_http_getError(Cranked *cranked, HTTPConnection_32 * connection);
++void playdate_http_getProgress(Cranked *cranked, HTTPConnection_32 * conn, int32 * read, int32 * total);
++int32 playdate_http_getResponseStatus(Cranked *cranked, HTTPConnection_32 * connection);
++uint32 playdate_http_getBytesAvailable(Cranked *cranked, HTTPConnection_32 * conn);
++void playdate_http_setReadTimeout(Cranked *cranked, HTTPConnection_32 * conn, int32 ms);
++void playdate_http_setReadBufferSize(Cranked *cranked, HTTPConnection_32 * conn, int32 bytes);
++int32 playdate_http_read(Cranked *cranked, HTTPConnection_32 * conn, void * buf, uint32 buflen);
+ void playdate_http_close(Cranked *cranked, HTTPConnection_32 * connection);
+ void playdate_http_setHeaderReceivedCallback(Cranked *cranked, HTTPConnection_32 * connection, cref_t headercb);
+ void playdate_http_setHeadersReadCallback(Cranked *cranked, HTTPConnection_32 * connection, cref_t callback);
  void playdate_http_setResponseCallback(Cranked *cranked, HTTPConnection_32 * connection, cref_t callback);
  void playdate_http_setRequestCompleteCallback(Cranked *cranked, HTTPConnection_32 * connection, cref_t callback);
  void playdate_http_setConnectionClosedCallback(Cranked *cranked, HTTPConnection_32 * connection, cref_t callback);
 -int32_t playdate_tcp_requestAccess(Cranked *cranked, uint8_t * server, int32_t port, uint8_t usessl, uint8_t * purpose, cref_t requestCallback, void * userdata);
-+int32_t playdate_tcp_requestAccess(Cranked *cranked, uint8_t * server, int32_t port, uint8_t usessl, uint8_t * purpose, cref_t requestCallback, cref_t userdata);
- TCPConnection_32 * playdate_tcp_newConnection(Cranked *cranked, uint8_t * server, int32_t port, uint8_t usessl);
+-TCPConnection_32 * playdate_tcp_newConnection(Cranked *cranked, uint8_t * server, int32_t port, uint8_t usessl);
++int32 playdate_tcp_requestAccess(Cranked *cranked, uint8_t * server, int32 port, uint8_t usessl, uint8_t * purpose, cref_t requestCallback, cref_t userdata);
++TCPConnection_32 * playdate_tcp_newConnection(Cranked *cranked, uint8_t * server, int32 port, uint8_t usessl);
  TCPConnection_32 * playdate_tcp_retain(Cranked *cranked, TCPConnection_32 * http);
  void playdate_tcp_release(Cranked *cranked, TCPConnection_32 * http);
- int32_t playdate_tcp_getError(Cranked *cranked, TCPConnection_32 * connection);
- void playdate_tcp_setConnectTimeout(Cranked *cranked, TCPConnection_32 * connection, int32_t ms);
+-int32_t playdate_tcp_getError(Cranked *cranked, TCPConnection_32 * connection);
+-void playdate_tcp_setConnectTimeout(Cranked *cranked, TCPConnection_32 * connection, int32_t ms);
 -void playdate_tcp_setUserdata(Cranked *cranked, TCPConnection_32 * connection, void * userdata);
 -void * playdate_tcp_getUserdata(Cranked *cranked, TCPConnection_32 * connection);
 -int32_t playdate_tcp_open(Cranked *cranked, TCPConnection_32 * conn, cref_t cb, void * ud);
+-int32_t playdate_tcp_close(Cranked *cranked, TCPConnection_32 * conn);
++int32 playdate_tcp_getError(Cranked *cranked, TCPConnection_32 * connection);
++void playdate_tcp_setConnectTimeout(Cranked *cranked, TCPConnection_32 * connection, int32 ms);
 +void playdate_tcp_setUserdata(Cranked *cranked, TCPConnection_32 * connection, cref_t userdata);
 +cref_t playdate_tcp_getUserdata(Cranked *cranked, TCPConnection_32 * connection);
-+int32_t playdate_tcp_open(Cranked *cranked, TCPConnection_32 * conn, cref_t cb, cref_t ud);
- int32_t playdate_tcp_close(Cranked *cranked, TCPConnection_32 * conn);
++int32 playdate_tcp_open(Cranked *cranked, TCPConnection_32 * conn, cref_t cb, cref_t ud);
++int32 playdate_tcp_close(Cranked *cranked, TCPConnection_32 * conn);
  void playdate_tcp_setConnectionClosedCallback(Cranked *cranked, TCPConnection_32 * conn, cref_t callback);
- void playdate_tcp_setReadTimeout(Cranked *cranked, TCPConnection_32 * conn, int32_t ms);
-diff --git a/core/gen/PlaydateFunctionMappings.cpp b/core/gen/PlaydateFunctionMappings.cpp
-index d45279e..298d784 100644
---- a/core/gen/PlaydateFunctionMappings.cpp
-+++ b/core/gen/PlaydateFunctionMappings.cpp
-@@ -14,7 +14,7 @@ NativeFunctionMetadata cranked::playdateFunctionTable[FUNCTION_TABLE_SIZE] {
- 	{ "playdate_sys_getCurrentTimeMilliseconds", (void *) playdate_sys_getCurrentTimeMilliseconds, {  }, ArgType::uint32_t },
- 	{ "playdate_sys_getSecondsSinceEpoch", (void *) playdate_sys_getSecondsSinceEpoch, { ArgType::ptr_t }, ArgType::uint32_t },
- 	{ "playdate_sys_drawFPS", (void *) playdate_sys_drawFPS, { ArgType::int32_t, ArgType::int32_t }, ArgType::void_t },
--	{ "playdate_sys_setUpdateCallback", (void *) playdate_sys_setUpdateCallback, { ArgType::uint32_t, ArgType::ptr_t }, ArgType::void_t },
-+	{ "playdate_sys_setUpdateCallback", (void *) playdate_sys_setUpdateCallback, { ArgType::uint32_t, ArgType::uint32_t }, ArgType::void_t },
- 	{ "playdate_sys_getButtonState", (void *) playdate_sys_getButtonState, { ArgType::ptr_t, ArgType::ptr_t, ArgType::ptr_t }, ArgType::void_t },
- 	{ "playdate_sys_setPeripheralsEnabled", (void *) playdate_sys_setPeripheralsEnabled, { ArgType::int32_t }, ArgType::void_t },
- 	{ "playdate_sys_getAccelerometer", (void *) playdate_sys_getAccelerometer, { ArgType::ptr_t, ArgType::ptr_t, ArgType::ptr_t }, ArgType::void_t },
-@@ -25,17 +25,17 @@ NativeFunctionMetadata cranked::playdateFunctionTable[FUNCTION_TABLE_SIZE] {
- 	{ "playdate_sys_getFlipped", (void *) playdate_sys_getFlipped, {  }, ArgType::int32_t },
- 	{ "playdate_sys_setAutoLockDisabled", (void *) playdate_sys_setAutoLockDisabled, { ArgType::int32_t }, ArgType::void_t },
- 	{ "playdate_sys_setMenuImage", (void *) playdate_sys_setMenuImage, { ArgType::ptr_t, ArgType::int32_t }, ArgType::void_t },
--	{ "playdate_sys_addMenuItem", (void *) playdate_sys_addMenuItem, { ArgType::ptr_t, ArgType::uint32_t, ArgType::ptr_t }, ArgType::ptr_t },
--	{ "playdate_sys_addCheckmarkMenuItem", (void *) playdate_sys_addCheckmarkMenuItem, { ArgType::ptr_t, ArgType::int32_t, ArgType::uint32_t, ArgType::ptr_t }, ArgType::ptr_t },
--	{ "playdate_sys_addOptionsMenuItem", (void *) playdate_sys_addOptionsMenuItem, { ArgType::ptr_t, ArgType::ptr_t, ArgType::int32_t, ArgType::uint32_t, ArgType::ptr_t }, ArgType::ptr_t },
-+	{ "playdate_sys_addMenuItem", (void *) playdate_sys_addMenuItem, { ArgType::ptr_t, ArgType::uint32_t, ArgType::uint32_t }, ArgType::ptr_t },
-+	{ "playdate_sys_addCheckmarkMenuItem", (void *) playdate_sys_addCheckmarkMenuItem, { ArgType::ptr_t, ArgType::int32_t, ArgType::uint32_t, ArgType::uint32_t }, ArgType::ptr_t },
-+	{ "playdate_sys_addOptionsMenuItem", (void *) playdate_sys_addOptionsMenuItem, { ArgType::ptr_t, ArgType::ptr_t, ArgType::int32_t, ArgType::uint32_t, ArgType::uint32_t }, ArgType::ptr_t },
- 	{ "playdate_sys_removeAllMenuItems", (void *) playdate_sys_removeAllMenuItems, {  }, ArgType::void_t },
- 	{ "playdate_sys_removeMenuItem", (void *) playdate_sys_removeMenuItem, { ArgType::ptr_t }, ArgType::void_t },
- 	{ "playdate_sys_getMenuItemValue", (void *) playdate_sys_getMenuItemValue, { ArgType::ptr_t }, ArgType::int32_t },
- 	{ "playdate_sys_setMenuItemValue", (void *) playdate_sys_setMenuItemValue, { ArgType::ptr_t, ArgType::int32_t }, ArgType::void_t },
- 	{ "playdate_sys_getMenuItemTitle", (void *) playdate_sys_getMenuItemTitle, { ArgType::ptr_t }, ArgType::ptr_t },
- 	{ "playdate_sys_setMenuItemTitle", (void *) playdate_sys_setMenuItemTitle, { ArgType::ptr_t, ArgType::ptr_t }, ArgType::void_t },
--	{ "playdate_sys_getMenuItemUserdata", (void *) playdate_sys_getMenuItemUserdata, { ArgType::ptr_t }, ArgType::ptr_t },
--	{ "playdate_sys_setMenuItemUserdata", (void *) playdate_sys_setMenuItemUserdata, { ArgType::ptr_t, ArgType::ptr_t }, ArgType::void_t },
-+	{ "playdate_sys_getMenuItemUserdata", (void *) playdate_sys_getMenuItemUserdata, { ArgType::ptr_t }, ArgType::uint32_t },
-+	{ "playdate_sys_setMenuItemUserdata", (void *) playdate_sys_setMenuItemUserdata, { ArgType::ptr_t, ArgType::uint32_t }, ArgType::void_t },
- 	{ "playdate_sys_getReduceFlashing", (void *) playdate_sys_getReduceFlashing, {  }, ArgType::int32_t },
- 	{ "playdate_sys_getElapsedTime", (void *) playdate_sys_getElapsedTime, {  }, ArgType::float_t },
- 	{ "playdate_sys_resetElapsedTime", (void *) playdate_sys_resetElapsedTime, {  }, ArgType::void_t },
-@@ -46,7 +46,7 @@ NativeFunctionMetadata cranked::playdateFunctionTable[FUNCTION_TABLE_SIZE] {
- 	{ "playdate_sys_convertEpochToDateTime", (void *) playdate_sys_convertEpochToDateTime, { ArgType::uint32_t, ArgType::ptr_t }, ArgType::void_t },
- 	{ "playdate_sys_convertDateTimeToEpoch", (void *) playdate_sys_convertDateTimeToEpoch, { ArgType::ptr_t }, ArgType::uint32_t },
- 	{ "playdate_sys_clearICache", (void *) playdate_sys_clearICache, {  }, ArgType::void_t },
--	{ "playdate_sys_setButtonCallback", (void *) playdate_sys_setButtonCallback, { ArgType::uint32_t, ArgType::ptr_t, ArgType::int32_t }, ArgType::void_t },
-+	{ "playdate_sys_setButtonCallback", (void *) playdate_sys_setButtonCallback, { ArgType::uint32_t, ArgType::uint32_t, ArgType::int32_t }, ArgType::void_t },
- 	{ "playdate_sys_setSerialMessageCallback", (void *) playdate_sys_setSerialMessageCallback, { ArgType::uint32_t }, ArgType::void_t },
- 	{ "playdate_sys_vaFormatString", (void *) playdate_sys_vaFormatString, { ArgType::ptr_t, ArgType::ptr_t, ArgType::va_list_t }, ArgType::int32_t },
- 	{ "playdate_sys_parseString", (void *) playdate_sys_parseString, { ArgType::ptr_t, ArgType::ptr_t, ArgType::varargs_t }, ArgType::int32_t },
-@@ -61,7 +61,7 @@ NativeFunctionMetadata cranked::playdateFunctionTable[FUNCTION_TABLE_SIZE] {
- 	{ "playdate_sys_getPowerStatus", (void *) playdate_sys_getPowerStatus, {  }, ArgType::int32_t },
- 	{ "playdate_sys_exitToLauncher", (void *) playdate_sys_exitToLauncher, {  }, ArgType::void_t },
- 	{ "playdate_file_geterr", (void *) playdate_file_geterr, {  }, ArgType::ptr_t },
--	{ "playdate_file_listfiles", (void *) playdate_file_listfiles, { ArgType::ptr_t, ArgType::uint32_t, ArgType::ptr_t, ArgType::int32_t }, ArgType::int32_t },
-+	{ "playdate_file_listfiles", (void *) playdate_file_listfiles, { ArgType::ptr_t, ArgType::uint32_t, ArgType::uint32_t, ArgType::int32_t }, ArgType::int32_t },
- 	{ "playdate_file_stat", (void *) playdate_file_stat, { ArgType::ptr_t, ArgType::ptr_t }, ArgType::int32_t },
- 	{ "playdate_file_mkdir", (void *) playdate_file_mkdir, { ArgType::ptr_t }, ArgType::int32_t },
- 	{ "playdate_file_unlink", (void *) playdate_file_unlink, { ArgType::ptr_t, ArgType::int32_t }, ArgType::int32_t },
-@@ -228,8 +228,8 @@ NativeFunctionMetadata cranked::playdateFunctionTable[FUNCTION_TABLE_SIZE] {
- 	{ "playdate_sprite_allOverlappingSprites", (void *) playdate_sprite_allOverlappingSprites, { ArgType::ptr_t }, ArgType::ptr_t },
- 	{ "playdate_sprite_setStencilPattern", (void *) playdate_sprite_setStencilPattern, { ArgType::ptr_t, ArgType::ptr_t }, ArgType::void_t },
- 	{ "playdate_sprite_clearStencil", (void *) playdate_sprite_clearStencil, { ArgType::ptr_t }, ArgType::void_t },
--	{ "playdate_sprite_setUserdata", (void *) playdate_sprite_setUserdata, { ArgType::ptr_t, ArgType::ptr_t }, ArgType::void_t },
--	{ "playdate_sprite_getUserdata", (void *) playdate_sprite_getUserdata, { ArgType::ptr_t }, ArgType::ptr_t },
-+	{ "playdate_sprite_setUserdata", (void *) playdate_sprite_setUserdata, { ArgType::ptr_t, ArgType::uint32_t }, ArgType::void_t },
-+	{ "playdate_sprite_getUserdata", (void *) playdate_sprite_getUserdata, { ArgType::ptr_t }, ArgType::uint32_t },
- 	{ "playdate_sprite_setStencilImage", (void *) playdate_sprite_setStencilImage, { ArgType::ptr_t, ArgType::ptr_t, ArgType::int32_t }, ArgType::void_t },
- 	{ "playdate_sprite_setCenter", (void *) playdate_sprite_setCenter, { ArgType::ptr_t, ArgType::float_t, ArgType::float_t }, ArgType::void_t },
- 	{ "playdate_sprite_getCenter", (void *) playdate_sprite_getCenter, { ArgType::ptr_t, ArgType::ptr_t, ArgType::ptr_t }, ArgType::void_t },
-@@ -250,7 +250,7 @@ NativeFunctionMetadata cranked::playdateFunctionTable[FUNCTION_TABLE_SIZE] {
- 	{ "playdate_sound_channel_freeChannel", (void *) playdate_sound_channel_freeChannel, { ArgType::ptr_t }, ArgType::void_t },
- 	{ "playdate_sound_channel_addSource", (void *) playdate_sound_channel_addSource, { ArgType::ptr_t, ArgType::ptr_t }, ArgType::int32_t },
- 	{ "playdate_sound_channel_removeSource", (void *) playdate_sound_channel_removeSource, { ArgType::ptr_t, ArgType::ptr_t }, ArgType::int32_t },
--	{ "playdate_sound_channel_addCallbackSource", (void *) playdate_sound_channel_addCallbackSource, { ArgType::ptr_t, ArgType::uint32_t, ArgType::ptr_t, ArgType::int32_t }, ArgType::ptr_t },
-+	{ "playdate_sound_channel_addCallbackSource", (void *) playdate_sound_channel_addCallbackSource, { ArgType::ptr_t, ArgType::uint32_t, ArgType::uint32_t, ArgType::int32_t }, ArgType::ptr_t },
- 	{ "playdate_sound_channel_addEffect", (void *) playdate_sound_channel_addEffect, { ArgType::ptr_t, ArgType::ptr_t }, ArgType::int32_t },
- 	{ "playdate_sound_channel_removeEffect", (void *) playdate_sound_channel_removeEffect, { ArgType::ptr_t, ArgType::ptr_t }, ArgType::int32_t },
- 	{ "playdate_sound_channel_setVolume", (void *) playdate_sound_channel_setVolume, { ArgType::ptr_t, ArgType::float_t }, ArgType::void_t },
-@@ -278,13 +278,13 @@ NativeFunctionMetadata cranked::playdateFunctionTable[FUNCTION_TABLE_SIZE] {
- 	{ "playdate_sound_fileplayer_setRate", (void *) playdate_sound_fileplayer_setRate, { ArgType::ptr_t, ArgType::float_t }, ArgType::void_t },
- 	{ "playdate_sound_fileplayer_setLoopRange", (void *) playdate_sound_fileplayer_setLoopRange, { ArgType::ptr_t, ArgType::float_t, ArgType::float_t }, ArgType::void_t },
- 	{ "playdate_sound_fileplayer_didUnderrun", (void *) playdate_sound_fileplayer_didUnderrun, { ArgType::ptr_t }, ArgType::int32_t },
--	{ "playdate_sound_fileplayer_setFinishCallback", (void *) playdate_sound_fileplayer_setFinishCallback, { ArgType::ptr_t, ArgType::uint32_t, ArgType::ptr_t }, ArgType::void_t },
--	{ "playdate_sound_fileplayer_setLoopCallback", (void *) playdate_sound_fileplayer_setLoopCallback, { ArgType::ptr_t, ArgType::uint32_t, ArgType::ptr_t }, ArgType::void_t },
-+	{ "playdate_sound_fileplayer_setFinishCallback", (void *) playdate_sound_fileplayer_setFinishCallback, { ArgType::ptr_t, ArgType::uint32_t, ArgType::uint32_t }, ArgType::void_t },
-+	{ "playdate_sound_fileplayer_setLoopCallback", (void *) playdate_sound_fileplayer_setLoopCallback, { ArgType::ptr_t, ArgType::uint32_t, ArgType::uint32_t }, ArgType::void_t },
- 	{ "playdate_sound_fileplayer_getOffset", (void *) playdate_sound_fileplayer_getOffset, { ArgType::ptr_t }, ArgType::float_t },
- 	{ "playdate_sound_fileplayer_getRate", (void *) playdate_sound_fileplayer_getRate, { ArgType::ptr_t }, ArgType::float_t },
- 	{ "playdate_sound_fileplayer_setStopOnUnderrun", (void *) playdate_sound_fileplayer_setStopOnUnderrun, { ArgType::ptr_t, ArgType::int32_t }, ArgType::void_t },
--	{ "playdate_sound_fileplayer_fadeVolume", (void *) playdate_sound_fileplayer_fadeVolume, { ArgType::ptr_t, ArgType::float_t, ArgType::float_t, ArgType::int32_t, ArgType::uint32_t, ArgType::ptr_t }, ArgType::void_t },
--	{ "playdate_sound_fileplayer_setMP3StreamSource", (void *) playdate_sound_fileplayer_setMP3StreamSource, { ArgType::ptr_t, ArgType::uint32_t, ArgType::ptr_t, ArgType::float_t }, ArgType::void_t },
-+	{ "playdate_sound_fileplayer_fadeVolume", (void *) playdate_sound_fileplayer_fadeVolume, { ArgType::ptr_t, ArgType::float_t, ArgType::float_t, ArgType::int32_t, ArgType::uint32_t, ArgType::uint32_t }, ArgType::void_t },
-+	{ "playdate_sound_fileplayer_setMP3StreamSource", (void *) playdate_sound_fileplayer_setMP3StreamSource, { ArgType::ptr_t, ArgType::uint32_t, ArgType::uint32_t, ArgType::float_t }, ArgType::void_t },
- 	{ "playdate_sound_fileplayer_setRateModulator", (void *) playdate_sound_fileplayer_setRateModulator, { ArgType::ptr_t, ArgType::ptr_t }, ArgType::void_t },
- 	{ "playdate_sound_fileplayer_getRateModulator", (void *) playdate_sound_fileplayer_getRateModulator, { ArgType::ptr_t }, ArgType::ptr_t },
- 	{ "playdate_sound_sample_newSampleBuffer", (void *) playdate_sound_sample_newSampleBuffer, { ArgType::int32_t }, ArgType::ptr_t },
-@@ -307,8 +307,8 @@ NativeFunctionMetadata cranked::playdateFunctionTable[FUNCTION_TABLE_SIZE] {
- 	{ "playdate_sound_sampleplayer_setOffset", (void *) playdate_sound_sampleplayer_setOffset, { ArgType::ptr_t, ArgType::float_t }, ArgType::void_t },
- 	{ "playdate_sound_sampleplayer_setRate", (void *) playdate_sound_sampleplayer_setRate, { ArgType::ptr_t, ArgType::float_t }, ArgType::void_t },
- 	{ "playdate_sound_sampleplayer_setPlayRange", (void *) playdate_sound_sampleplayer_setPlayRange, { ArgType::ptr_t, ArgType::int32_t, ArgType::int32_t }, ArgType::void_t },
--	{ "playdate_sound_sampleplayer_setFinishCallback", (void *) playdate_sound_sampleplayer_setFinishCallback, { ArgType::ptr_t, ArgType::uint32_t, ArgType::ptr_t }, ArgType::void_t },
--	{ "playdate_sound_sampleplayer_setLoopCallback", (void *) playdate_sound_sampleplayer_setLoopCallback, { ArgType::ptr_t, ArgType::uint32_t, ArgType::ptr_t }, ArgType::void_t },
-+	{ "playdate_sound_sampleplayer_setFinishCallback", (void *) playdate_sound_sampleplayer_setFinishCallback, { ArgType::ptr_t, ArgType::uint32_t, ArgType::uint32_t }, ArgType::void_t },
-+	{ "playdate_sound_sampleplayer_setLoopCallback", (void *) playdate_sound_sampleplayer_setLoopCallback, { ArgType::ptr_t, ArgType::uint32_t, ArgType::uint32_t }, ArgType::void_t },
- 	{ "playdate_sound_sampleplayer_getOffset", (void *) playdate_sound_sampleplayer_getOffset, { ArgType::ptr_t }, ArgType::float_t },
- 	{ "playdate_sound_sampleplayer_getRate", (void *) playdate_sound_sampleplayer_getRate, { ArgType::ptr_t }, ArgType::float_t },
- 	{ "playdate_sound_sampleplayer_setPaused", (void *) playdate_sound_sampleplayer_setPaused, { ArgType::ptr_t, ArgType::int32_t }, ArgType::void_t },
-@@ -317,7 +317,7 @@ NativeFunctionMetadata cranked::playdateFunctionTable[FUNCTION_TABLE_SIZE] {
- 	{ "playdate_sound_synth_newSynth", (void *) playdate_sound_synth_newSynth, {  }, ArgType::ptr_t },
- 	{ "playdate_sound_synth_freeSynth", (void *) playdate_sound_synth_freeSynth, { ArgType::ptr_t }, ArgType::void_t },
- 	{ "playdate_sound_synth_setWaveform", (void *) playdate_sound_synth_setWaveform, { ArgType::ptr_t, ArgType::int32_t }, ArgType::void_t },
--	{ "playdate_sound_synth_setGenerator_deprecated", (void *) playdate_sound_synth_setGenerator_deprecated, { ArgType::ptr_t, ArgType::int32_t, ArgType::uint32_t, ArgType::uint32_t, ArgType::uint32_t, ArgType::uint32_t, ArgType::uint32_t, ArgType::ptr_t }, ArgType::void_t },
-+	{ "playdate_sound_synth_setGenerator_deprecated", (void *) playdate_sound_synth_setGenerator_deprecated, { ArgType::ptr_t, ArgType::int32_t, ArgType::uint32_t, ArgType::uint32_t, ArgType::uint32_t, ArgType::uint32_t, ArgType::uint32_t, ArgType::uint32_t }, ArgType::void_t },
- 	{ "playdate_sound_synth_setSample", (void *) playdate_sound_synth_setSample, { ArgType::ptr_t, ArgType::ptr_t, ArgType::uint32_t, ArgType::uint32_t }, ArgType::void_t },
- 	{ "playdate_sound_synth_setAttackTime", (void *) playdate_sound_synth_setAttackTime, { ArgType::ptr_t, ArgType::float_t }, ArgType::void_t },
- 	{ "playdate_sound_synth_setDecayTime", (void *) playdate_sound_synth_setDecayTime, { ArgType::ptr_t, ArgType::float_t }, ArgType::void_t },
-@@ -341,7 +341,7 @@ NativeFunctionMetadata cranked::playdateFunctionTable[FUNCTION_TABLE_SIZE] {
- 	{ "playdate_sound_synth_isPlaying", (void *) playdate_sound_synth_isPlaying, { ArgType::ptr_t }, ArgType::int32_t },
- 	{ "playdate_sound_synth_getEnvelope", (void *) playdate_sound_synth_getEnvelope, { ArgType::ptr_t }, ArgType::ptr_t },
- 	{ "playdate_sound_synth_setWavetable", (void *) playdate_sound_synth_setWavetable, { ArgType::ptr_t, ArgType::ptr_t, ArgType::int32_t, ArgType::int32_t, ArgType::int32_t }, ArgType::int32_t },
--	{ "playdate_sound_synth_setGenerator", (void *) playdate_sound_synth_setGenerator, { ArgType::ptr_t, ArgType::int32_t, ArgType::uint32_t, ArgType::uint32_t, ArgType::uint32_t, ArgType::uint32_t, ArgType::uint32_t, ArgType::uint32_t, ArgType::ptr_t }, ArgType::void_t },
-+	{ "playdate_sound_synth_setGenerator", (void *) playdate_sound_synth_setGenerator, { ArgType::ptr_t, ArgType::int32_t, ArgType::uint32_t, ArgType::uint32_t, ArgType::uint32_t, ArgType::uint32_t, ArgType::uint32_t, ArgType::uint32_t, ArgType::uint32_t }, ArgType::void_t },
- 	{ "playdate_sound_synth_copy", (void *) playdate_sound_synth_copy, { ArgType::ptr_t }, ArgType::ptr_t },
- 	{ "playdate_sound_synth_clearEnvelope", (void *) playdate_sound_synth_clearEnvelope, { ArgType::ptr_t }, ArgType::void_t },
- 	{ "playdate_sound_sequence_newSequence", (void *) playdate_sound_sequence_newSequence, {  }, ArgType::ptr_t },
-@@ -360,18 +360,18 @@ NativeFunctionMetadata cranked::playdateFunctionTable[FUNCTION_TABLE_SIZE] {
- 	{ "playdate_sound_sequence_allNotesOff", (void *) playdate_sound_sequence_allNotesOff, { ArgType::ptr_t }, ArgType::void_t },
- 	{ "playdate_sound_sequence_isPlaying", (void *) playdate_sound_sequence_isPlaying, { ArgType::ptr_t }, ArgType::int32_t },
- 	{ "playdate_sound_sequence_getLength", (void *) playdate_sound_sequence_getLength, { ArgType::ptr_t }, ArgType::uint32_t },
--	{ "playdate_sound_sequence_play", (void *) playdate_sound_sequence_play, { ArgType::ptr_t, ArgType::uint32_t, ArgType::ptr_t }, ArgType::void_t },
-+	{ "playdate_sound_sequence_play", (void *) playdate_sound_sequence_play, { ArgType::ptr_t, ArgType::uint32_t, ArgType::uint32_t }, ArgType::void_t },
- 	{ "playdate_sound_sequence_stop", (void *) playdate_sound_sequence_stop, { ArgType::ptr_t }, ArgType::void_t },
- 	{ "playdate_sound_sequence_getCurrentStep", (void *) playdate_sound_sequence_getCurrentStep, { ArgType::ptr_t, ArgType::ptr_t }, ArgType::int32_t },
- 	{ "playdate_sound_sequence_setCurrentStep", (void *) playdate_sound_sequence_setCurrentStep, { ArgType::ptr_t, ArgType::int32_t, ArgType::int32_t, ArgType::int32_t }, ArgType::void_t },
- 	{ "playdate_sound_sequence_getTempo", (void *) playdate_sound_sequence_getTempo, { ArgType::ptr_t }, ArgType::float_t },
--	{ "playdate_sound_effect_newEffect", (void *) playdate_sound_effect_newEffect, { ArgType::uint32_t, ArgType::ptr_t }, ArgType::ptr_t },
-+	{ "playdate_sound_effect_newEffect", (void *) playdate_sound_effect_newEffect, { ArgType::uint32_t, ArgType::uint32_t }, ArgType::ptr_t },
- 	{ "playdate_sound_effect_freeEffect", (void *) playdate_sound_effect_freeEffect, { ArgType::ptr_t }, ArgType::void_t },
- 	{ "playdate_sound_effect_setMix", (void *) playdate_sound_effect_setMix, { ArgType::ptr_t, ArgType::float_t }, ArgType::void_t },
- 	{ "playdate_sound_effect_setMixModulator", (void *) playdate_sound_effect_setMixModulator, { ArgType::ptr_t, ArgType::ptr_t }, ArgType::void_t },
- 	{ "playdate_sound_effect_getMixModulator", (void *) playdate_sound_effect_getMixModulator, { ArgType::ptr_t }, ArgType::ptr_t },
--	{ "playdate_sound_effect_setUserdata", (void *) playdate_sound_effect_setUserdata, { ArgType::ptr_t, ArgType::ptr_t }, ArgType::void_t },
--	{ "playdate_sound_effect_getUserdata", (void *) playdate_sound_effect_getUserdata, { ArgType::ptr_t }, ArgType::ptr_t },
-+	{ "playdate_sound_effect_setUserdata", (void *) playdate_sound_effect_setUserdata, { ArgType::ptr_t, ArgType::uint32_t }, ArgType::void_t },
-+	{ "playdate_sound_effect_getUserdata", (void *) playdate_sound_effect_getUserdata, { ArgType::ptr_t }, ArgType::uint32_t },
- 	{ "playdate_sound_effect_twopolefilter_newFilter", (void *) playdate_sound_effect_twopolefilter_newFilter, {  }, ArgType::ptr_t },
- 	{ "playdate_sound_effect_twopolefilter_freeFilter", (void *) playdate_sound_effect_twopolefilter_freeFilter, { ArgType::ptr_t }, ArgType::void_t },
- 	{ "playdate_sound_effect_twopolefilter_setType", (void *) playdate_sound_effect_twopolefilter_setType, { ArgType::ptr_t, ArgType::int32_t }, ArgType::void_t },
-@@ -434,7 +434,7 @@ NativeFunctionMetadata cranked::playdateFunctionTable[FUNCTION_TABLE_SIZE] {
- 	{ "playdate_sound_lfo_setCenter", (void *) playdate_sound_lfo_setCenter, { ArgType::ptr_t, ArgType::float_t }, ArgType::void_t },
- 	{ "playdate_sound_lfo_setDepth", (void *) playdate_sound_lfo_setDepth, { ArgType::ptr_t, ArgType::float_t }, ArgType::void_t },
- 	{ "playdate_sound_lfo_setArpeggiation", (void *) playdate_sound_lfo_setArpeggiation, { ArgType::ptr_t, ArgType::int32_t, ArgType::ptr_t }, ArgType::void_t },
--	{ "playdate_sound_lfo_setFunction", (void *) playdate_sound_lfo_setFunction, { ArgType::ptr_t, ArgType::uint32_t, ArgType::ptr_t, ArgType::int32_t }, ArgType::void_t },
-+	{ "playdate_sound_lfo_setFunction", (void *) playdate_sound_lfo_setFunction, { ArgType::ptr_t, ArgType::uint32_t, ArgType::uint32_t, ArgType::int32_t }, ArgType::void_t },
- 	{ "playdate_sound_lfo_setDelay", (void *) playdate_sound_lfo_setDelay, { ArgType::ptr_t, ArgType::float_t, ArgType::float_t }, ArgType::void_t },
- 	{ "playdate_sound_lfo_setRetrigger", (void *) playdate_sound_lfo_setRetrigger, { ArgType::ptr_t, ArgType::int32_t }, ArgType::void_t },
- 	{ "playdate_sound_lfo_getValue", (void *) playdate_sound_lfo_getValue, { ArgType::ptr_t }, ArgType::float_t },
-@@ -456,7 +456,7 @@ NativeFunctionMetadata cranked::playdateFunctionTable[FUNCTION_TABLE_SIZE] {
- 	{ "playdate_sound_source_setVolume", (void *) playdate_sound_source_setVolume, { ArgType::ptr_t, ArgType::float_t, ArgType::float_t }, ArgType::void_t },
- 	{ "playdate_sound_source_getVolume", (void *) playdate_sound_source_getVolume, { ArgType::ptr_t, ArgType::ptr_t, ArgType::ptr_t }, ArgType::void_t },
- 	{ "playdate_sound_source_isPlaying", (void *) playdate_sound_source_isPlaying, { ArgType::ptr_t }, ArgType::int32_t },
--	{ "playdate_sound_source_setFinishCallback", (void *) playdate_sound_source_setFinishCallback, { ArgType::ptr_t, ArgType::uint32_t, ArgType::ptr_t }, ArgType::void_t },
-+	{ "playdate_sound_source_setFinishCallback", (void *) playdate_sound_source_setFinishCallback, { ArgType::ptr_t, ArgType::uint32_t, ArgType::uint32_t }, ArgType::void_t },
- 	{ "playdate_control_signal_newSignal", (void *) playdate_control_signal_newSignal, {  }, ArgType::ptr_t },
- 	{ "playdate_control_signal_freeSignal", (void *) playdate_control_signal_freeSignal, { ArgType::ptr_t }, ArgType::void_t },
- 	{ "playdate_control_signal_clearEvents", (void *) playdate_control_signal_clearEvents, { ArgType::ptr_t }, ArgType::void_t },
-@@ -494,22 +494,22 @@ NativeFunctionMetadata cranked::playdateFunctionTable[FUNCTION_TABLE_SIZE] {
- 	{ "playdate_sound_instrument_getVolume", (void *) playdate_sound_instrument_getVolume, { ArgType::ptr_t, ArgType::ptr_t, ArgType::ptr_t }, ArgType::void_t },
- 	{ "playdate_sound_instrument_activeVoiceCount", (void *) playdate_sound_instrument_activeVoiceCount, { ArgType::ptr_t }, ArgType::int32_t },
- 	{ "playdate_sound_getCurrentTime", (void *) playdate_sound_getCurrentTime, {  }, ArgType::uint32_t },
--	{ "playdate_sound_addSource", (void *) playdate_sound_addSource, { ArgType::uint32_t, ArgType::ptr_t, ArgType::int32_t }, ArgType::ptr_t },
-+	{ "playdate_sound_addSource", (void *) playdate_sound_addSource, { ArgType::uint32_t, ArgType::uint32_t, ArgType::int32_t }, ArgType::ptr_t },
- 	{ "playdate_sound_getDefaultChannel", (void *) playdate_sound_getDefaultChannel, {  }, ArgType::ptr_t },
- 	{ "playdate_sound_addChannel", (void *) playdate_sound_addChannel, { ArgType::ptr_t }, ArgType::int32_t },
- 	{ "playdate_sound_removeChannel", (void *) playdate_sound_removeChannel, { ArgType::ptr_t }, ArgType::int32_t },
--	{ "playdate_sound_setMicCallback", (void *) playdate_sound_setMicCallback, { ArgType::uint32_t, ArgType::ptr_t, ArgType::int32_t }, ArgType::int32_t },
-+	{ "playdate_sound_setMicCallback", (void *) playdate_sound_setMicCallback, { ArgType::uint32_t, ArgType::uint32_t, ArgType::int32_t }, ArgType::int32_t },
- 	{ "playdate_sound_getHeadphoneState", (void *) playdate_sound_getHeadphoneState, { ArgType::ptr_t, ArgType::ptr_t, ArgType::uint32_t }, ArgType::void_t },
- 	{ "playdate_sound_setOutputsActive", (void *) playdate_sound_setOutputsActive, { ArgType::int32_t, ArgType::int32_t }, ArgType::void_t },
- 	{ "playdate_sound_removeSource", (void *) playdate_sound_removeSource, { ArgType::ptr_t }, ArgType::int32_t },
--	{ "playdate_sound_signal_newSignal", (void *) playdate_sound_signal_newSignal, { ArgType::uint32_t, ArgType::uint32_t, ArgType::uint32_t, ArgType::uint32_t, ArgType::ptr_t }, ArgType::ptr_t },
-+	{ "playdate_sound_signal_newSignal", (void *) playdate_sound_signal_newSignal, { ArgType::uint32_t, ArgType::uint32_t, ArgType::uint32_t, ArgType::uint32_t, ArgType::uint32_t }, ArgType::ptr_t },
- 	{ "playdate_sound_signal_freeSignal", (void *) playdate_sound_signal_freeSignal, { ArgType::ptr_t }, ArgType::void_t },
- 	{ "playdate_sound_signal_getValue", (void *) playdate_sound_signal_getValue, { ArgType::ptr_t }, ArgType::float_t },
- 	{ "playdate_sound_signal_setValueScale", (void *) playdate_sound_signal_setValueScale, { ArgType::ptr_t, ArgType::float_t }, ArgType::void_t },
- 	{ "playdate_sound_signal_setValueOffset", (void *) playdate_sound_signal_setValueOffset, { ArgType::ptr_t, ArgType::float_t }, ArgType::void_t },
- 	{ "playdate_sound_signal_newSignalForValue", (void *) playdate_sound_signal_newSignalForValue, { ArgType::ptr_t }, ArgType::ptr_t },
- 	{ "playdate_sound_getError", (void *) playdate_sound_getError, {  }, ArgType::ptr_t },
--	{ "playdate_sound_requestMicAccess", (void *) playdate_sound_requestMicAccess, { ArgType::ptr_t, ArgType::uint32_t, ArgType::ptr_t }, ArgType::int32_t },
-+	{ "playdate_sound_requestMicAccess", (void *) playdate_sound_requestMicAccess, { ArgType::ptr_t, ArgType::uint32_t, ArgType::uint32_t }, ArgType::int32_t },
- 	{ "playdate_lua_addFunction", (void *) playdate_lua_addFunction, { ArgType::uint32_t, ArgType::ptr_t, ArgType::ptr_t }, ArgType::int32_t },
- 	{ "playdate_lua_registerClass", (void *) playdate_lua_registerClass, { ArgType::ptr_t, ArgType::ptr_t, ArgType::ptr_t, ArgType::int32_t, ArgType::ptr_t }, ArgType::int32_t },
- 	{ "playdate_lua_pushFunction", (void *) playdate_lua_pushFunction, { ArgType::uint32_t }, ArgType::void_t },
-@@ -542,7 +542,7 @@ NativeFunctionMetadata cranked::playdateFunctionTable[FUNCTION_TABLE_SIZE] {
- 	{ "playdate_lua_getUserValue", (void *) playdate_lua_getUserValue, { ArgType::ptr_t, ArgType::uint32_t }, ArgType::int32_t },
- 	{ "playdate_lua_callFunction_deprecated", (void *) playdate_lua_callFunction_deprecated, { ArgType::ptr_t, ArgType::int32_t }, ArgType::void_t },
- 	{ "playdate_lua_callFunction", (void *) playdate_lua_callFunction, { ArgType::ptr_t, ArgType::int32_t, ArgType::ptr_t }, ArgType::int32_t },
--	{ "playdate_json_initEncoder", (void *) playdate_json_initEncoder, { ArgType::ptr_t, ArgType::uint32_t, ArgType::ptr_t, ArgType::int32_t }, ArgType::void_t },
-+	{ "playdate_json_initEncoder", (void *) playdate_json_initEncoder, { ArgType::ptr_t, ArgType::uint32_t, ArgType::uint32_t, ArgType::int32_t }, ArgType::void_t },
- 	{ "playdate_json_decode", (void *) playdate_json_decode, { ArgType::ptr_t, ArgType::struct2_t, ArgType::ptr_t }, ArgType::int32_t },
- 	{ "playdate_json_decodeString", (void *) playdate_json_decodeString, { ArgType::ptr_t, ArgType::ptr_t, ArgType::ptr_t }, ArgType::int32_t },
- 	{ "playdate_scoreboards_addScore", (void *) playdate_scoreboards_addScore, { ArgType::ptr_t, ArgType::uint32_t, ArgType::uint32_t }, ArgType::int32_t },
-@@ -552,15 +552,15 @@ NativeFunctionMetadata cranked::playdateFunctionTable[FUNCTION_TABLE_SIZE] {
- 	{ "playdate_scoreboards_freeBoardsList", (void *) playdate_scoreboards_freeBoardsList, { ArgType::ptr_t }, ArgType::void_t },
- 	{ "playdate_scoreboards_getScores", (void *) playdate_scoreboards_getScores, { ArgType::ptr_t, ArgType::uint32_t }, ArgType::int32_t },
- 	{ "playdate_scoreboards_freeScoresList", (void *) playdate_scoreboards_freeScoresList, { ArgType::ptr_t }, ArgType::void_t },
--	{ "playdate_http_requestAccess", (void *) playdate_http_requestAccess, { ArgType::ptr_t, ArgType::int32_t, ArgType::uint8_t, ArgType::ptr_t, ArgType::uint32_t, ArgType::ptr_t }, ArgType::int32_t },
-+	{ "playdate_http_requestAccess", (void *) playdate_http_requestAccess, { ArgType::ptr_t, ArgType::int32_t, ArgType::uint8_t, ArgType::ptr_t, ArgType::uint32_t, ArgType::uint32_t }, ArgType::int32_t },
- 	{ "playdate_http_newConnection", (void *) playdate_http_newConnection, { ArgType::ptr_t, ArgType::int32_t, ArgType::uint8_t }, ArgType::ptr_t },
- 	{ "playdate_http_retain", (void *) playdate_http_retain, { ArgType::ptr_t }, ArgType::ptr_t },
- 	{ "playdate_http_release", (void *) playdate_http_release, { ArgType::ptr_t }, ArgType::void_t },
- 	{ "playdate_http_setConnectTimeout", (void *) playdate_http_setConnectTimeout, { ArgType::ptr_t, ArgType::int32_t }, ArgType::void_t },
- 	{ "playdate_http_setKeepAlive", (void *) playdate_http_setKeepAlive, { ArgType::ptr_t, ArgType::uint8_t }, ArgType::void_t },
- 	{ "playdate_http_setByteRange", (void *) playdate_http_setByteRange, { ArgType::ptr_t, ArgType::int32_t, ArgType::int32_t }, ArgType::void_t },
--	{ "playdate_http_setUserdata", (void *) playdate_http_setUserdata, { ArgType::ptr_t, ArgType::ptr_t }, ArgType::void_t },
--	{ "playdate_http_getUserdata", (void *) playdate_http_getUserdata, { ArgType::ptr_t }, ArgType::ptr_t },
-+	{ "playdate_http_setUserdata", (void *) playdate_http_setUserdata, { ArgType::ptr_t, ArgType::uint32_t }, ArgType::void_t },
-+	{ "playdate_http_getUserdata", (void *) playdate_http_getUserdata, { ArgType::ptr_t }, ArgType::uint32_t },
- 	{ "playdate_http_get", (void *) playdate_http_get, { ArgType::ptr_t, ArgType::ptr_t, ArgType::ptr_t, ArgType::uint32_t }, ArgType::int32_t },
- 	{ "playdate_http_post", (void *) playdate_http_post, { ArgType::ptr_t, ArgType::ptr_t, ArgType::ptr_t, ArgType::uint32_t, ArgType::ptr_t, ArgType::uint32_t }, ArgType::int32_t },
- 	{ "playdate_http_query", (void *) playdate_http_query, { ArgType::ptr_t, ArgType::ptr_t, ArgType::ptr_t, ArgType::ptr_t, ArgType::uint32_t, ArgType::ptr_t, ArgType::uint32_t }, ArgType::int32_t },
-@@ -577,15 +577,15 @@ NativeFunctionMetadata cranked::playdateFunctionTable[FUNCTION_TABLE_SIZE] {
- 	{ "playdate_http_setResponseCallback", (void *) playdate_http_setResponseCallback, { ArgType::ptr_t, ArgType::uint32_t }, ArgType::void_t },
- 	{ "playdate_http_setRequestCompleteCallback", (void *) playdate_http_setRequestCompleteCallback, { ArgType::ptr_t, ArgType::uint32_t }, ArgType::void_t },
- 	{ "playdate_http_setConnectionClosedCallback", (void *) playdate_http_setConnectionClosedCallback, { ArgType::ptr_t, ArgType::uint32_t }, ArgType::void_t },
--	{ "playdate_tcp_requestAccess", (void *) playdate_tcp_requestAccess, { ArgType::ptr_t, ArgType::int32_t, ArgType::uint8_t, ArgType::ptr_t, ArgType::uint32_t, ArgType::ptr_t }, ArgType::int32_t },
-+	{ "playdate_tcp_requestAccess", (void *) playdate_tcp_requestAccess, { ArgType::ptr_t, ArgType::int32_t, ArgType::uint8_t, ArgType::ptr_t, ArgType::uint32_t, ArgType::uint32_t }, ArgType::int32_t },
- 	{ "playdate_tcp_newConnection", (void *) playdate_tcp_newConnection, { ArgType::ptr_t, ArgType::int32_t, ArgType::uint8_t }, ArgType::ptr_t },
- 	{ "playdate_tcp_retain", (void *) playdate_tcp_retain, { ArgType::ptr_t }, ArgType::ptr_t },
- 	{ "playdate_tcp_release", (void *) playdate_tcp_release, { ArgType::ptr_t }, ArgType::void_t },
- 	{ "playdate_tcp_getError", (void *) playdate_tcp_getError, { ArgType::ptr_t }, ArgType::int32_t },
- 	{ "playdate_tcp_setConnectTimeout", (void *) playdate_tcp_setConnectTimeout, { ArgType::ptr_t, ArgType::int32_t }, ArgType::void_t },
--	{ "playdate_tcp_setUserdata", (void *) playdate_tcp_setUserdata, { ArgType::ptr_t, ArgType::ptr_t }, ArgType::void_t },
--	{ "playdate_tcp_getUserdata", (void *) playdate_tcp_getUserdata, { ArgType::ptr_t }, ArgType::ptr_t },
--	{ "playdate_tcp_open", (void *) playdate_tcp_open, { ArgType::ptr_t, ArgType::uint32_t, ArgType::ptr_t }, ArgType::int32_t },
-+	{ "playdate_tcp_setUserdata", (void *) playdate_tcp_setUserdata, { ArgType::ptr_t, ArgType::uint32_t }, ArgType::void_t },
-+	{ "playdate_tcp_getUserdata", (void *) playdate_tcp_getUserdata, { ArgType::ptr_t }, ArgType::uint32_t },
-+	{ "playdate_tcp_open", (void *) playdate_tcp_open, { ArgType::ptr_t, ArgType::uint32_t, ArgType::uint32_t }, ArgType::int32_t },
- 	{ "playdate_tcp_close", (void *) playdate_tcp_close, { ArgType::ptr_t }, ArgType::int32_t },
- 	{ "playdate_tcp_setConnectionClosedCallback", (void *) playdate_tcp_setConnectionClosedCallback, { ArgType::ptr_t, ArgType::uint32_t }, ArgType::void_t },
- 	{ "playdate_tcp_setReadTimeout", (void *) playdate_tcp_setReadTimeout, { ArgType::ptr_t, ArgType::int32_t }, ArgType::void_t },
+-void playdate_tcp_setReadTimeout(Cranked *cranked, TCPConnection_32 * conn, int32_t ms);
+-void playdate_tcp_setReadBufferSize(Cranked *cranked, TCPConnection_32 * conn, int32_t bytes);
+-uint32_t playdate_tcp_getBytesAvailable(Cranked *cranked, TCPConnection_32 * conn);
+-int32_t playdate_tcp_read(Cranked *cranked, TCPConnection_32 * conn, void * buffer, uint32_t length);
+-int32_t playdate_tcp_write(Cranked *cranked, TCPConnection_32 * conn, void * buffer, uint32_t length);
+-uint32_t playdate_tcp_getSentBytesPending(Cranked *cranked, TCPConnection_32 * conn);
+-int32_t playdate_network_getStatus(Cranked *cranked);
++void playdate_tcp_setReadTimeout(Cranked *cranked, TCPConnection_32 * conn, int32 ms);
++void playdate_tcp_setReadBufferSize(Cranked *cranked, TCPConnection_32 * conn, int32 bytes);
++uint32 playdate_tcp_getBytesAvailable(Cranked *cranked, TCPConnection_32 * conn);
++int32 playdate_tcp_read(Cranked *cranked, TCPConnection_32 * conn, void * buffer, uint32 length);
++int32 playdate_tcp_write(Cranked *cranked, TCPConnection_32 * conn, void * buffer, uint32 length);
++uint32 playdate_tcp_getSentBytesPending(Cranked *cranked, TCPConnection_32 * conn);
++int32 playdate_network_getStatus(Cranked *cranked);
+ void playdate_network_setEnabled(Cranked *cranked, uint8_t flag, cref_t callback);
+ void json_encoder_startArray(Cranked *cranked, json_encoder_32 * encoder);
+ void json_encoder_addArrayMember(Cranked *cranked, json_encoder_32 * encoder);
+ void json_encoder_endArray(Cranked *cranked, json_encoder_32 * encoder);
+ void json_encoder_startTable(Cranked *cranked, json_encoder_32 * encoder);
+-void json_encoder_addTableMember(Cranked *cranked, json_encoder_32 * encoder, uint8_t * name, int32_t len);
++void json_encoder_addTableMember(Cranked *cranked, json_encoder_32 * encoder, uint8_t * name, int32 len);
+ void json_encoder_endTable(Cranked *cranked, json_encoder_32 * encoder);
+ void json_encoder_writeNull(Cranked *cranked, json_encoder_32 * encoder);
+ void json_encoder_writeFalse(Cranked *cranked, json_encoder_32 * encoder);
+ void json_encoder_writeTrue(Cranked *cranked, json_encoder_32 * encoder);
+-void json_encoder_writeInt(Cranked *cranked, json_encoder_32 * encoder, int32_t num);
++void json_encoder_writeInt(Cranked *cranked, json_encoder_32 * encoder, int32 num);
+ void json_encoder_writeDouble(Cranked *cranked, json_encoder_32 * encoder, double num);
+-void json_encoder_writeString(Cranked *cranked, json_encoder_32 * encoder, uint8_t * str, int32_t len);
++void json_encoder_writeString(Cranked *cranked, json_encoder_32 * encoder, uint8_t * str, int32 len);
+ 
+ }
 diff --git a/core/libs/minimp3/LICENSE b/core/libs/minimp3/LICENSE
 new file mode 100644
 index 0000000..2c4afab

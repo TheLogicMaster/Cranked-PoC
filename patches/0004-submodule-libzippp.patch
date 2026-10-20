@@ -1,0 +1,13 @@
+diff --git a/src/libzippp.cpp b/src/libzippp.cpp
+index 37d9cd1..ded29fb 100644
+--- a/src/libzippp.cpp
++++ b/src/libzippp.cpp
+@@ -610,7 +610,7 @@ string ZipArchive::getEntryComment(const ZipEntry& entry, State state) const {
+     if (state==Original) { flag = flag | LIBZIPPP_ORIGINAL_STATE_FLAGS; }
+     else { flag = ZIP_FL_ENC_GUESS; }
+ 
+-    unsigned int clen;
++    zip_uint32_t clen;
+     const char* com = zip_file_get_comment(zipHandle, entry.getIndex(), &clen, flag);
+     string comment = com==nullptr ? string() : string(com, clen);
+     return comment;

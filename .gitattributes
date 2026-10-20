@@ -3,3 +3,4 @@
 * text=auto eol=lf
 *.patch -text
 *.png binary
+packaging/dos/* text eol=crlf

@@ -3,5 +3,7 @@
 0002-front-ends.patch                .
 0003-build-and-test-runner.patch     .
 0004-submodule-ffi.patch             core/libs/ffi
+0004-submodule-gif-h.patch           core/libs/gif-h
+0004-submodule-libzippp.patch        core/libs/libzippp
 0004-submodule-lua54.patch           core/libs/lua54
 0004-submodule-unicorn.patch         core/libs/unicorn

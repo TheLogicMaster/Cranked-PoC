@@ -194,3 +194,16 @@ index 1a8c9ae..46c0a80 100644
        }
      }
      // extra normal argument which is the pointer to the varargs.
+diff --git a/src/x86/sysv.S b/src/x86/sysv.S
+index c7a0fb5..5c724e2 100644
+--- a/src/x86/sysv.S
++++ b/src/x86/sysv.S
+@@ -968,7 +968,7 @@ ENDF(C(__x86.get_pc_thunk.dx))
+ #ifdef __APPLE__
+ .section __TEXT,__eh_frame,coalesced,no_toc+strip_static_syms+live_support
+ EHFrame0:
+-#elif defined(X86_WIN32)
++#elif defined(X86_WIN32) || defined(__DJGPP__)
+ .section .eh_frame,"r"
+ #elif defined(HAVE_AS_X86_64_UNWIND_SECTION_TYPE)
+ .section .eh_frame,EH_FRAME_FLAGS,@unwind

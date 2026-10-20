@@ -1,11 +1,14 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index afdb1c3..a6551f3 100644
+index afdb1c3..9814fa4 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -7,6 +7,14 @@ project(cranked)
+@@ -7,6 +7,17 @@ project(cranked)
  set(CMAKE_CXX_STANDARD 20)
  set(CMAKE_CXX_STANDARD_REQUIRED ON)
  set(CMAKE_CXX_EXTENSIONS OFF)
++if (DJGPP) # its headers declare POSIX types (off_t) only in GNU mode
++    set(CMAKE_CXX_EXTENSIONS ON)
++endif ()
 +# the libretro core and the Java binding are shared libraries, so every static library linked into them must be
 +# position independent (otherwise the bundled asio fails to link: "relocation R_X86_64_TPOFF32 ... can not be used
 +# when making a shared object")
@@ -17,7 +20,7 @@ index afdb1c3..a6551f3 100644
  
  add_subdirectory(core)
  
-@@ -25,3 +33,7 @@ endif ()
+@@ -25,3 +36,10 @@ endif ()
  if (NOT SKIP_LIBRETRO)
      add_subdirectory(libretro)
  endif ()
@@ -25,6 +28,33 @@ index afdb1c3..a6551f3 100644
 +if (EMSCRIPTEN) # browser front end
 +    add_subdirectory(web)
 +endif ()
++if (DJGPP) # DOS front end
++    add_subdirectory(dos)
++endif ()
+diff --git a/cmake/djgpp.cmake b/cmake/djgpp.cmake
+new file mode 100644
+index 0000000..bc0d037
+--- /dev/null
++++ b/cmake/djgpp.cmake
+@@ -0,0 +1,18 @@
++# CMake toolchain file for the DJGPP cross compiler (32-bit DOS, i386-pc-msdosdjgpp). The code needs a Pentium
++# (i586) or later with an FPU. DJGPP_PREFIX is the folder the toolchain is installed in.
++set(CMAKE_SYSTEM_NAME Generic)
++set(CMAKE_SYSTEM_PROCESSOR i386)
++set(DJGPP ON)
++set(DJGPP_PREFIX "$ENV{DJGPP_PREFIX}" CACHE PATH "DJGPP install folder")
++set(CMAKE_C_COMPILER ${DJGPP_PREFIX}/bin/i386-pc-msdosdjgpp-gcc)
++set(CMAKE_CXX_COMPILER ${DJGPP_PREFIX}/bin/i386-pc-msdosdjgpp-g++)
++set(CMAKE_AR ${DJGPP_PREFIX}/bin/i386-pc-msdosdjgpp-ar)
++set(CMAKE_RANLIB ${DJGPP_PREFIX}/bin/i386-pc-msdosdjgpp-ranlib)
++set(CMAKE_EXECUTABLE_SUFFIX .exe)
++set(CMAKE_FIND_ROOT_PATH ${DJGPP_PREFIX}/i386-pc-msdosdjgpp)
++set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
++set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
++set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
++set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
++set(CMAKE_C_FLAGS_INIT "-march=i586 -mtune=i686")
++set(CMAKE_CXX_FLAGS_INIT "-march=i586 -mtune=i686")
 diff --git a/runner/CMakeLists.txt b/runner/CMakeLists.txt
 new file mode 100644
 index 0000000..8a439e8
@@ -49,7 +79,7 @@ index 0000000..59673bb
 +Module['preRun'].push(function () { if (typeof process !== 'undefined') Object.assign(ENV, process.env); });
 diff --git a/runner/runner.cpp b/runner/runner.cpp
 new file mode 100644
-index 0000000..a4952ae
+index 0000000..974290a
 --- /dev/null
 +++ b/runner/runner.cpp
 @@ -0,0 +1,120 @@
@@ -79,7 +109,7 @@ index 0000000..a4952ae
 +        static std::atomic<long long> deadline{ 0 };
 +        auto steadyMs = [] { return (long long) std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); };
 +        deadline = steadyMs() + (long long) (seconds * 1000);
-+#ifndef __EMSCRIPTEN__ // no threads in the WebAssembly build: the run has no real-time watchdog there
++#if !defined(__EMSCRIPTEN__) && !defined(__DJGPP__) // no threads in the WebAssembly and DOS builds: no real-time watchdog there
 +        std::thread([c, steadyMs] {
 +            while (!finished and steadyMs() < deadline.load() + 5000)
 +                std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -174,9 +204,120 @@ index 0000000..a4952ae
 +    std::_Exit(0);
 +}
 diff --git a/scripts/process_headers.py b/scripts/process_headers.py
-index 3274116..3101094 100644
+index 3274116..d7cd71c 100644
 --- a/scripts/process_headers.py
 +++ b/scripts/process_headers.py
+@@ -14,7 +14,7 @@ COMMA_SPLIT_MAGIC = r',\s*(?![^()]*\))'  # https://stackoverflow.com/a/26634150
+ 
+ KNOWN_STRUCTS = ['SDFile']
+ CUSTOM_TYPES = [
+-    ('SDFile', 'uint32_t', 'SDFile_32'),
++    ('SDFile', 'uint32', 'SDFile_32'),
+     ('SpriteCollisionResponseType', 'int8_t', 'int8_t'),
+ ]
+ CUSTOM_NATIVE_TYPES = {
+@@ -42,18 +42,18 @@ class CType:
+         c_type = re.sub(r'(?:(?<!\w)const\s)+', '', c_type, flags=re.MULTILINE)
+         c_type = c_type.strip()
+         if match := re.match(r'\s*struct (\w+)\s*\*', c_type):
+-            self.emu_type = 'uint32_t'
++            self.emu_type = 'uint32'
+             self.wrapper_type = match[1] + '_32 ' + '*' * c_type.count('*') if c_type.count('*') <= 1 else 'cref_t *'
+             return
+         if re.match(r'\s*(?<!\w)(?:lua_CFunction|PD\w+CallbackFunction)\s*', c_type):
+-            self.emu_type = 'uint32_t'
++            self.emu_type = 'uint32'
+             self.wrapper_type = 'cref_t'
+             return
+         if '*' in c_type:
+             ptr += c_type.count('*')
+             c_type = c_type.replace('*', '')
+         if re.match(r'\s*void\s*', c_type):
+-            self.emu_type = 'void' if ptr == 0 else 'uint32_t'
++            self.emu_type = 'void' if ptr == 0 else 'uint32'
+             self.wrapper_type = 'void' if ptr == 0 else 'void ' + '*' * ptr if ptr == 1 else 'cref_t *'
+             return
+         if re.match(r'\s*\.\.\.\s*', c_type):
+@@ -67,17 +67,17 @@ class CType:
+         type_replacements = {
+             r'unsigned\s+long\s+long': 'uint64_t',
+             r'(signed)?\s*long\s+long': 'int64_t',
+-            r'unsigned\s+(long)?\s*(?:int|long)': 'uint32_t',
+-            r'(signed)?\s*(long)?\s*(?:int|long)': 'int32_t',
++            r'unsigned\s+(long)?\s*(?:int|long)': 'uint32',
++            r'(signed)?\s*(long)?\s*(?:int|long)': 'int32',
+             r'unsigned\s+short': 'uint16_t',
+             r'(signed)?\s*short': 'int16_t',
+             r'signed\s+char': 'int8_t',
+             r'(unsigned)?\s*char': 'uint8_t',
+             'float': 'float',
+             'double': 'double',
+-            'size_t': 'uint32_t',
+-            'uintptr_t': 'uint32_t',
+-            'intptr_t': 'int32_t',
++            'size_t': 'uint32',
++            'uintptr_t': 'uint32',
++            'intptr_t': 'int32',
+             'bool': 'uint8_t',
+         }
+ 
+@@ -94,7 +94,7 @@ class CType:
+             self.emu_type = c_type
+             self.wrapper_type = c_type
+         else:
+-            self.emu_type = 'uint32_t'
++            self.emu_type = 'uint32'
+             self.wrapper_type = c_type + ' ' + '*' * ptr if ptr == 1 else 'cref_t *'
+ 
+     def __str__(self):
+@@ -223,30 +223,30 @@ def main():
+ 
+         def get_type(c_type: str) -> CType:
+             if re.match(r'\s*(?:const)?\s*PD\w*CallbackFunction\s*\*\s*', c_type):
+-                return CType(c_type, emu_type='uint32_t', wrapper_type='cref_t')
++                return CType(c_type, emu_type='uint32', wrapper_type='cref_t')
+             for custom in CUSTOM_TYPES:
+                 if re.fullmatch(rf'\s*(?:const)?\s*{custom[0]}\s*\**\s*', c_type):
+                     ptr_count = c_type.count('*')
+                     if ptr_count == 1:
+-                        return CType(custom[0], emu_type='uint32_t', wrapper_type=custom[2] if custom[2] == 'cref_t' else f'{custom[2]} ' + '*' * ptr_count)
++                        return CType(custom[0], emu_type='uint32', wrapper_type=custom[2] if custom[2] == 'cref_t' else f'{custom[2]} ' + '*' * ptr_count)
+                     elif ptr_count > 1:
+-                        return CType(custom[0], emu_type='uint32_t', wrapper_type='cref_t *')
++                        return CType(custom[0], emu_type='uint32', wrapper_type='cref_t *')
+                     return CType(custom[0], emu_type=custom[1], wrapper_type=custom[2])
+             for typedef, replacement in known_typedefs.items():
+                 c_type = re.sub(rf'(?<!\w){typedef}(?!\w)', replacement, c_type)
+             for func_type in known_function_types:
+                 if re.fullmatch(rf'\s*(?:const)?\s*{func_type}\s*\**\s*', c_type):
+-                    return CType(c_type, emu_type='uint32_t', wrapper_type='cref_t')
++                    return CType(c_type, emu_type='uint32', wrapper_type='cref_t')
+             if re.fullmatch(rf'\s*(?:const)?\s*enum\s+\w+\s*', c_type):
+-                return CType(c_type, emu_type='int32_t', wrapper_type='int32_t')
++                return CType(c_type, emu_type='int32', wrapper_type='int32')
+             for enum in known_enums:
+                 if re.fullmatch(rf'\s*(?:const)?\s*{enum}\s*\*+\s*', c_type):
+-                    return CType(c_type, emu_type='uint32_t', wrapper_type='int32_t ' + '*' * c_type.count('*') if c_type.count('*') <= 1 else 'cref_t *')
++                    return CType(c_type, emu_type='uint32', wrapper_type='int32 ' + '*' * c_type.count('*') if c_type.count('*') <= 1 else 'cref_t *')
+                 elif re.fullmatch(rf'\s*(?:const)?\s*{enum}\s*', c_type):
+-                    return CType(c_type, emu_type='int32_t', wrapper_type='int32_t')
++                    return CType(c_type, emu_type='int32', wrapper_type='int32')
+             for s in known_structs:
+                 if re.fullmatch(rf'\s*(?:const)?\s*{s}\s*\*+\s*', c_type):
+-                    return CType(c_type, emu_type='uint32_t', wrapper_type=f'{s}_32 ' + '*' * c_type.count('*') if c_type.count('*') <= 1 else 'cref_t *')
++                    return CType(c_type, emu_type='uint32', wrapper_type=f'{s}_32 ' + '*' * c_type.count('*') if c_type.count('*') <= 1 else 'cref_t *')
+                 elif re.fullmatch(rf'\s*(?:const)?\s*{s}\s*', c_type):
+                     return CType(c_type, emu_type=f'{s}_32', wrapper_type=f'{s}_32')
+             return CType(c_type)
+@@ -276,7 +276,7 @@ def main():
+                                 if re.match(r'\s*\.\.\.\s*', arg):
+                                     args.append(CField('', get_type('...')))
+                                 elif ptr_match := re.match(rf'{FUNC_PTR_PATTERN}$', arg):
+-                                    args.append(CField(ptr_match[2], CType(arg, emu_type='uint32_t', wrapper_type='cref_t')))
++                                    args.append(CField(ptr_match[2], CType(arg, emu_type='uint32', wrapper_type='cref_t')))
+                                 elif ptr_match := re.match(rf'{PARAM_PATTERN}$', arg):
+                                     args.append(CField(ptr_match[2], get_type(ptr_match[1] + (ptr_match[3] if ptr_match[3] else ''))))
+                                 else:
 @@ -335,6 +335,18 @@ def main():
      for custom_api_struct in CUSTOM_API_STRUCTS:
          collect_api_structs(find_struct(custom_api_struct), None, '')
@@ -185,7 +326,7 @@ index 3274116..3101094 100644
 +    # are passed as raw 32-bit values instead of being translated as addresses. A game may pass any value, such as
 +    # (void *) 1, and translation can only work for addresses inside emulated memory.
 +    OPAQUE_PARAM_NAMES = {'userdata', 'ud', 'buttonud', 'context'}
-+    opaque = CType('cref_t', emu_type='uint32_t', wrapper_type='cref_t')
++    opaque = CType('cref_t', emu_type='uint32', wrapper_type='cref_t')
 +    for func in functions:
 +        for param in func.params:
 +            if isinstance(param, CField) and param.field_name in OPAQUE_PARAM_NAMES and param.c_type.wrapper_type == 'void *':
