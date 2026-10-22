@@ -1,0 +1,612 @@
+<!doctype html>
+<!-- Browser front end for Cranked (WebAssembly). Serve this folder over HTTP with cranked.js and cranked.wasm. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#1f1d1a">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<title>Cranked</title>
+<style>
+  :root {
+    --bg: #f4f2ec; --fg: #1f1d1a; --muted: #6b665d; --line: #d9d4c8; --panel: #fffdf8; --accent: #b8860b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #171614; --fg: #ebe7de; --muted: #9b958a; --line: #34312c; --panel: #201f1c; --accent: #e0b040; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 20px 16px 48px; }
+  header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+  h1 { font-size: 20px; margin: 0; letter-spacing: .02em; }
+  h2 { font-size: 15px; margin: 24px 0 8px; }
+  .sub { margin: 0; color: var(--muted); font-size: 14px; }
+  .screen { background: #000; border-radius: 10px; padding: 12px; display: flex; justify-content: center; align-items: center; position: relative; }
+  .screen:fullscreen { border-radius: 0; padding: 0; }
+  /* --ar: the shown image's width over its height (the screen's 5 / 3, or the drawn device's) */
+  canvas { width: 100%; max-width: 800px; aspect-ratio: var(--ar, 1.6667); image-rendering: pixelated; background: #b1aea7; display: block; }
+  canvas.device { background: transparent; }
+  .screen:fullscreen canvas { max-width: none; width: min(100vw, calc(100vh * var(--ar, 1.6667))); }
+  .look { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; margin-top: 8px; }
+  .look label { display: inline-flex; gap: 6px; align-items: center; }
+  .look [hidden] { display: none; }
+  .look select, .look input[type=range] { font: inherit; }
+  .paused::after { content: "Paused"; position: absolute; inset: auto 0 18px; text-align: center; color: #fff; font-weight: 600; letter-spacing: .05em; text-shadow: 0 1px 3px #000; }
+  .bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 12px 0; }
+  label.btn, a.btn, button { border: 1px solid var(--line); background: var(--panel); color: var(--fg); border-radius: 8px;
+    padding: 7px 12px; font: inherit; cursor: pointer; text-decoration: none; }
+  label.btn:hover, a.btn:hover, button:hover { border-color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  input[type=file] { display: none; }
+  #status { color: var(--muted); margin-left: auto; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+  .drop { outline: 2px dashed var(--accent); outline-offset: 4px; }
+  .library { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line); }
+  .library li { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+  .library .title { font-weight: 600; }
+  .library .meta { color: var(--muted); font-size: 13px; }
+  .library .grow { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .empty { color: var(--muted); font-size: 14px; }
+  details { margin-top: 20px; }
+  summary { cursor: pointer; font-weight: 600; }
+  table { border-collapse: collapse; margin-top: 8px; }
+  td { padding: 3px 14px 3px 0; vertical-align: top; }
+  td:first-child { color: var(--muted); white-space: nowrap; }
+  .touch { display: none; justify-content: space-between; align-items: center; gap: 12px; margin-top: 14px; user-select: none; touch-action: none; }
+  @media (pointer: coarse) { .touch { display: flex; } }
+  .touch.on { display: flex; }
+  .dpad { display: grid; grid-template-columns: repeat(3, 46px); grid-template-rows: repeat(3, 46px); flex: none; gap: 4px; }
+  .pad { border: 1px solid var(--line); background: var(--panel); color: var(--fg); border-radius: 10px; font: 600 16px system-ui; touch-action: none; padding: 0; }
+  .pad.down { background: var(--accent); color: #000; }
+  .ab { display: flex; gap: 10px; align-items: center; flex: none; }
+  .ab .pad { width: 56px; height: 56px; border-radius: 50%; }
+  .crank { flex: none; width: 80px; height: 80px; border-radius: 50%; border: 1px solid var(--line); background: var(--panel); position: relative; touch-action: none; }
+  .crank::after { content: ""; position: absolute; left: 50%; top: 6px; width: 4px; height: 34px; margin-left: -2px; background: var(--accent); border-radius: 2px; transform-origin: 2px 34px; transform: rotate(var(--angle, 0deg)); }
+  /* a phone: the pads shrink so the row fits (and again below 350 px, for 320 px screens) */
+  @media (max-width: 420px) {
+    .touch { gap: 6px; }
+    .dpad { grid-template-columns: repeat(3, 38px); grid-template-rows: repeat(3, 38px); gap: 3px; }
+    .ab { gap: 6px; } .ab .pad { width: 48px; height: 48px; }
+    .crank { width: 66px; height: 66px; }
+    .crank::after { height: 26px; transform-origin: 2px 26px; }
+  }
+  @media (max-width: 350px) {
+    .dpad { grid-template-columns: repeat(3, 34px); grid-template-rows: repeat(3, 34px); }
+    .ab .pad { width: 44px; height: 44px; }
+    .crank { width: 58px; height: 58px; }
+    .crank::after { height: 22px; transform-origin: 2px 22px; }
+  }
+  .library .src { color: var(--muted); font-size: 12px; }
+  .library a { color: inherit; }
+  .kiosk .site-only { display: none !important; }
+  footer { margin-top: 28px; color: var(--muted); font-size: 12px; }
+  footer a { color: inherit; }
+  kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; font: 13px ui-monospace, monospace; background: var(--panel); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1 id="siteTitle">Cranked</h1>
+    <p class="sub" id="siteSub">Playdate games in the browser: Lua games, and C games on a built-in ARM interpreter.</p>
+  </header>
+  <div class="screen" id="screen"><canvas id="lcd" width="400" height="240"></canvas></div>
+  <div class="touch" id="touch">
+    <div class="dpad">
+      <span></span><button class="pad" data-bit="4" aria-label="Up">&uarr;</button><span></span>
+      <button class="pad" data-bit="1" aria-label="Left">&larr;</button><button class="pad" data-bit="128" aria-label="Menu">&#9776;</button><button class="pad" data-bit="2" aria-label="Right">&rarr;</button>
+      <span></span><button class="pad" data-bit="8" aria-label="Down">&darr;</button><span></span>
+    </div>
+    <div class="crank" id="crankdial" aria-label="Crank"></div>
+    <div class="ab"><button class="pad" data-bit="16">B</button><button class="pad" data-bit="32">A</button></div>
+  </div>
+  <div class="bar">
+    <label class="btn site-only">Open zipped game<input type="file" id="zipfile" accept=".zip"></label>
+    <label class="btn site-only">Open .pdx folder<input type="file" id="folder" webkitdirectory></label>
+    <button id="pause" type="button" disabled>Pause</button>
+    <button id="full" type="button">Fullscreen</button>
+    <button id="shot" type="button" disabled>Screenshot</button>
+    <button id="mute" type="button">Sound on</button>
+    <button id="exportSaves" type="button" disabled>Export saves</button>
+    <label class="btn" id="importLabel">Import saves<input type="file" id="importSaves" accept=".zip"></label>
+    <span id="status">Loading engine...</span>
+  </div>
+
+  <div class="site-only" id="catalogSection" hidden>
+    <h2 id="catalogTitle">Games</h2>
+    <ul class="library" id="catalog"></ul>
+  </div>
+  <div class="site-only">
+    <h2>Library</h2>
+    <ul class="library" id="library"></ul>
+    <p class="empty" id="empty">Games you open are kept here, in this browser, to play again without picking the file.</p>
+  </div>
+
+  <details id="lookPanel">
+    <summary>Screen</summary>
+    <div class="look">
+      <label>Colors <select id="lookColors"></select></label>
+      <label><input type="checkbox" id="lookBlend"> Blend frames</label>
+      <label><input type="checkbox" id="lookGrid"> Pixel grid</label>
+      <label><input type="checkbox" id="lookShadow"> Pixel shadow</label>
+      <label>Room light <input type="range" id="lookLight" min="0" max="1" step="0.05" value="0"></label>
+      <label id="lookTiltLabel" hidden><input type="checkbox" id="lookTilt"> Tilting the phone moves the light</label>
+      <label><input type="checkbox" id="lookScan"> Scanlines (CRT)</label>
+      <label><input type="checkbox" id="lookDevice"> Device frame</label>
+      <button id="lookReset" type="button">Reset</button>
+    </div>
+    <p class="empty">Blend frames mixes each frame with the one before, as the eye does with pixels a game flickers to make
+      grey. The device frame's buttons light up as they are pressed, and its crank turns.</p>
+  </details>
+  <details>
+    <summary>Controls</summary>
+    <table>
+      <tr><td>D-pad</td><td><kbd>&larr;</kbd> <kbd>&uarr;</kbd> <kbd>&rarr;</kbd> <kbd>&darr;</kbd></td></tr>
+      <tr><td>A, B</td><td><kbd>X</kbd> and <kbd>Z</kbd></td></tr>
+      <tr><td>Menu</td><td><kbd>Enter</kbd> or <kbd>Esc</kbd></td></tr>
+      <tr><td>Crank</td><td>mouse wheel over the screen, or <kbd>,</kbd> and <kbd>.</kbd>; <kbd>C</kbd> docks and undocks it</td></tr>
+      <tr><td>Pause</td><td><kbd>P</kbd></td></tr>
+      <tr><td>Gamepad</td><td>d-pad or left stick; right and bottom buttons for A and B; Start or Back for the menu; right stick or shoulder buttons for the crank</td></tr>
+      <tr><td>Touch</td><td>the buttons under the screen; drag round the dial to turn the crank</td></tr>
+      <tr><td>Saves</td><td>kept in this browser (IndexedDB); Export saves and Import saves move them between browsers</td></tr>
+    </table>
+  </details>
+  <footer>
+    Playdate fonts by Panic Inc., licensed under <a href="https://creativecommons.org/licenses/by/4.0/" rel="license noopener" target="_blank">CC BY 4.0</a>.
+    Playdate is a trademark of Panic Inc. This project is not affiliated with Panic.
+  </footer>
+</main>
+<script src="zip.js"></script>
+<script>
+"use strict";
+// The engine (engine.js) runs on this page's thread by default, or in a worker with ?worker=1 (worker.js);
+// this page handles input, drawing, audio output, the library and the buttons. Hosting needs only static files either
+// way.
+const BUTTONS = { ArrowLeft: 1, ArrowRight: 2, ArrowUp: 4, ArrowDown: 8, KeyZ: 16, KeyX: 32, Enter: 128, Escape: 128 };
+const RATE = 44100;
+const $ = id => document.getElementById(id);
+const status = $("status"), screen = $("screen");
+const ctx2d = $("lcd").getContext("2d");
+let ready = false, running = false, paused = false, buttons = 0, crank = 0, docked = true;
+let currentFolder = "", currentEntry = null;
+let audio = null, audioNode = null, muted = false, currentTitle = "", pendingEntry = null, frameMs = 0, latest = null;
+
+function setStatus(text) { status.textContent = text; }
+function store(key, value) { try { localStorage.setItem(key, value); } catch (e) {} }
+function load(key) { try { return localStorage.getItem(key); } catch (e) { return null; } }
+
+const useWorker = new URLSearchParams(location.search).has("worker") && typeof Worker !== "undefined";
+const worker = useWorker ? new Worker("worker.js") : { postMessage() {}, onmessage: null, onerror: null };
+if (!useWorker) { // the same messages, on this thread: load the engine's scripts, then connect them
+  const handler = { pending: [], run: null };
+  worker.postMessage = msg => { if (handler.run) handler.run({ data: msg }); else handler.pending.push(msg); };
+  const load = src => new Promise((resolve, reject) => { const el = document.createElement("script"); el.src = src; el.onload = resolve; el.onerror = () => reject(new Error("could not load " + src)); document.head.append(el); });
+  load("cranked.js").then(() => load("engine.js")).then(() => {
+    handler.run = createCrankedEngine(msg => worker.onmessage && worker.onmessage({ data: msg }), false);
+    for (const msg of handler.pending.splice(0)) handler.run({ data: msg });
+  }).catch(e => worker.onerror && worker.onerror(e));
+}
+worker.onmessage = e => {
+  const msg = e.data;
+  if (msg.type === "ready") { ready = true; setStatus(site.game ? "Starting..." : "Open a game, or pick one from the library"); connectAudio(); siteReady(); }
+  else if (msg.type === "loaded") {
+    if (!msg.ok) { setStatus(msg.error); running = false; updateButtons(); return; }
+    currentFolder = (msg.info && msg.info.dataFolder) || "";
+    running = true; paused = false; docked = true; crank = 0; screen.classList.remove("paused"); updateButtons();
+    setStatus("Running (loaded in " + Math.round(msg.loadMs) + " ms)");
+    if (pendingEntry) remember(pendingEntry, msg.info);
+  } else if (msg.type === "saves") savesExported(msg);
+  else if (msg.type === "imported") savesImported(msg);
+  else if (msg.type === "frame") { latest = msg.rgba; latestWidth = msg.width; latestHeight = msg.height; frameMs = msg.frameMs; }
+  else if (msg.type === "stopped") { setStatus(msg.error); running = false; updateButtons(); }
+};
+worker.onerror = e => setStatus("The engine could not start: " + (e.message || "worker error"));
+
+function sendInput() { worker.postMessage({ type: "input", input: { buttons: buttons | touchBits | padBits, crank, docked } }); }
+
+// ---------- the library: games kept in IndexedDB as a zip's bytes or a folder's files ----------
+const DB = new Promise((resolve, reject) => {
+  const req = indexedDB.open("cranked-library", 1);
+  req.onupgradeneeded = () => req.result.createObjectStore("games", { keyPath: "id" });
+  req.onsuccess = () => resolve(req.result);
+  req.onerror = () => reject(req.error);
+});
+async function dbDo(mode, fn) {
+  const db = await DB;
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction("games", mode); const r = fn(tx.objectStore("games"));
+    tx.oncomplete = () => resolve(r && r.result); tx.onerror = () => reject(tx.error);
+  });
+}
+async function renderLibrary() {
+  let games = [];
+  try { games = await dbDo("readonly", s => s.getAll()); } catch (e) {}
+  games.sort((a, b) => b.played - a.played);
+  const list = $("library"); list.textContent = "";
+  $("empty").style.display = games.length ? "none" : "";
+  for (const g of games) {
+    const li = document.createElement("li");
+    const text = document.createElement("div"); text.className = "grow";
+    const t = document.createElement("div"); t.className = "title"; t.textContent = g.title;
+    const m = document.createElement("div"); m.className = "meta";
+    m.textContent = [g.author, (g.size / 1048576).toFixed(1) + " MB"].filter(Boolean).join(" \u00b7 ");
+    text.append(t, m);
+    const play = document.createElement("button"); play.textContent = "Play"; play.onclick = () => startGame(g);
+    const del = document.createElement("button"); del.textContent = "Remove";
+    del.onclick = async () => { await dbDo("readwrite", s => s.delete(g.id)); renderLibrary(); };
+    li.append(text, play, del); list.append(li);
+  }
+}
+async function remember(entry, info) {
+  const id = (info && info.bundleID) || entry.id || entry.fileName;
+  const title = (info && info.name) || entry.title || entry.fileName;
+  const author = (info && info.author) || entry.author || "";
+  currentTitle = title;
+  try { await dbDo("readwrite", s => s.put({ ...entry, id, title, author, played: Date.now() })); } catch (e) { console.warn("library", e); }
+  renderLibrary();
+}
+
+// ---------- loading: the game's bytes go to the worker (copied, so the library keeps its own) ----------
+function startGame(entry) {
+  if (!ready) return;
+  pendingEntry = entry; currentEntry = entry; setStatus("Loading...");
+  if (entry.kind === "zip") worker.postMessage({ type: "load", kind: "zip", zip: entry.zip });
+  else worker.postMessage({ type: "load", kind: "files", files: entry.files });
+}
+async function openZip(file) {
+  const data = new Uint8Array(await file.arrayBuffer());
+  startGame({ kind: "zip", fileName: file.name.replace(/\.zip$/i, ""), zip: data, size: data.length });
+}
+$("zipfile").addEventListener("change", e => { const f = e.target.files[0]; if (f) openZip(f); e.target.value = ""; });
+$("folder").addEventListener("change", async e => {
+  const picked = [...e.target.files]; e.target.value = ""; if (!picked.length) return;
+  const files = []; let size = 0;
+  for (const f of picked) {
+    const data = new Uint8Array(await f.arrayBuffer()); size += data.length;
+    files.push({ path: f.webkitRelativePath.split("/").slice(1).join("/"), data }); // without the folder's own name
+  }
+  const fileName = picked[0].webkitRelativePath.split("/")[0].replace(/\.pdx$/i, "");
+  startGame({ kind: "files", fileName, files, size });
+});
+screen.addEventListener("dragover", e => { e.preventDefault(); screen.classList.add("drop"); });
+screen.addEventListener("dragleave", () => screen.classList.remove("drop"));
+screen.addEventListener("drop", e => {
+  e.preventDefault(); screen.classList.remove("drop");
+  const f = e.dataTransfer.files[0]; if (f) openZip(f);
+});
+renderLibrary();
+
+// ---------- the site: one game (kiosk) or a catalog of games to download ----------
+// site.json next to the page (optional): { "title", "subtitle", "game": url of a zipped game (one game, no library),
+// "catalog": url of a game list (default games.json), "proxy": a download proxy's address, to which a game's
+// address is appended, encoded (see packaging/download-proxy) }. The URL can set ?game=<url> and ?catalog=<url> too.
+// The game list: { "title": "Games", "games": [{ "title", "author", "url", "version", "license", "source",
+// "description", "download", "page" }] }; a downloaded game is kept in the library and downloaded again only when its
+// version changes. "url" is a game the site hosts. A game hosted elsewhere has "download" (its own address, tried
+// directly and then through the proxy, since most hosts do not allow downloads from other sites) and/or "page" (the
+// author's page, to get it from by hand and open here).
+const params = new URLSearchParams(location.search);
+const site = { title: "", subtitle: "", game: "", catalog: "games.json", proxy: "" };
+const siteLoaded = fetch("site.json", { cache: "no-cache" }).then(r => r.ok ? r.json() : {}).catch(() => ({})).then(cfg => {
+  for (const k of Object.keys(site)) if (typeof cfg[k] === "string") site[k] = cfg[k];
+  if (params.get("game")) site.game = params.get("game");
+  if (params.get("catalog")) site.catalog = params.get("catalog");
+  if (site.title) { $("siteTitle").textContent = site.title; document.title = site.title; }
+  if (site.subtitle) $("siteSub").textContent = site.subtitle;
+  if (site.game) document.body.classList.add("kiosk");
+  else renderCatalog();
+});
+function webUrl(url) { // a relative or http(s) address, as an absolute one; anything else is refused
+  try { const u = new URL(url, location.href); return u.protocol === "http:" || u.protocol === "https:" ? u.href : null; }
+  catch (e) { return null; }
+}
+async function siteReady() {
+  await siteLoaded;
+  if (site.game) playUrl(site.game, { title: site.title });
+}
+async function fetchGame(url, label) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(r.status + " " + r.statusText);
+  const total = +r.headers.get("content-length") || 0;
+  if (!r.body || !total) return new Uint8Array(await r.arrayBuffer());
+  const reader = r.body.getReader(), chunks = []; let got = 0;
+  for (;;) {
+    const { done, value } = await reader.read(); if (done) break;
+    chunks.push(value); got += value.length;
+    setStatus(label + " " + Math.min(100, Math.round(got * 100 / total)) + "%");
+  }
+  const out = new Uint8Array(got); let at = 0;
+  for (const c of chunks) { out.set(c, at); at += c.length; }
+  return out;
+}
+async function cachedGame(url, version) {
+  try { return (await dbDo("readonly", s => s.getAll())).find(g => g.source === url && (g.version || "") === (version || "")); }
+  catch (e) { return null; }
+}
+async function playUrl(url, meta, viaProxy) {
+  const abs = webUrl(url);
+  if (!abs) { setStatus("Not a web address: " + url); return; }
+  const cached = await cachedGame(abs, meta.version);
+  if (cached) { startGame(cached); return; }
+  try {
+    const label = "Downloading " + (meta.title || "the game");
+    let zip;
+    try { zip = await fetchGame(abs, label); }
+    catch (e) { // a host that does not allow downloads from other sites fails here (the browser hides why)
+      const proxy = viaProxy && site.proxy && webUrl(site.proxy);
+      if (!proxy) throw new Error(meta.page ? "its host does not allow it from here; get it from the author's page and open it here" : e.message);
+      zip = await fetchGame(proxy + encodeURIComponent(abs), label);
+    }
+    startGame({ kind: "zip", fileName: meta.title || decodeURIComponent(abs.split("/").pop()).replace(/\.zip$/i, ""), title: meta.title,
+                author: meta.author, zip, size: zip.length, source: abs, version: meta.version || "", license: meta.license || "" });
+  } catch (e) { setStatus("Could not download the game: " + e.message); }
+}
+async function renderCatalog() {
+  let list;
+  try {
+    const url = webUrl(site.catalog); if (!url) return;
+    const r = await fetch(url, { cache: "no-cache" }); if (!r.ok) return;
+    list = await r.json();
+  } catch (e) { return; }
+  const games = Array.isArray(list.games) ? list.games.filter(g => g && [g.url, g.download, g.page].some(u => typeof u === "string")) : [];
+  if (!games.length) return;
+  if (typeof list.title === "string") $("catalogTitle").textContent = list.title;
+  const ul = $("catalog"); ul.textContent = "";
+  for (const g of games) {
+    const li = document.createElement("li");
+    const text = document.createElement("div"); text.className = "grow";
+    const t = document.createElement("div"); t.className = "title"; t.textContent = g.title || g.url || g.download || g.page;
+    const m = document.createElement("div"); m.className = "meta";
+    m.textContent = [g.author, g.license].filter(x => typeof x === "string" && x).join(" \u00b7 ");
+    text.append(t, m);
+    if (typeof g.description === "string" && g.description) { const d = document.createElement("div"); d.className = "meta"; d.textContent = g.description; text.append(d); }
+    const src = webUrl(g.source || "");
+    if (src) { const a = document.createElement("a"); a.className = "src"; a.href = src; a.target = "_blank"; a.rel = "noopener"; a.textContent = "Source and license"; text.append(a); }
+    li.append(text);
+    const page = webUrl(typeof g.page === "string" ? g.page : "");
+    if (typeof g.url === "string" || typeof g.download === "string") {
+      const play = document.createElement("button"); play.textContent = "Play";
+      play.onclick = () => typeof g.url === "string" ? playUrl(g.url, g) : playUrl(g.download, g, true);
+      li.append(play);
+    } else if (page) { // only the author's page: the game is downloaded there and opened here
+      const a = document.createElement("a"); a.className = "btn"; a.href = page; a.target = "_blank"; a.rel = "noopener";
+      a.textContent = "Get it"; a.title = "Download it from the author's page, then open or drop the file here"; li.append(a);
+    }
+    ul.append(li);
+  }
+  $("catalogSection").hidden = false;
+}
+
+// ---------- save data: exported as a zip of the game's data folder, and imported from one ----------
+$("exportSaves").onclick = () => { if (currentFolder) worker.postMessage({ type: "exportSaves", folder: currentFolder }); };
+function savesExported(msg) {
+  if (!msg.files.length) { setStatus("This game has no save data yet"); return; }
+  const blob = new Blob([CrankedZip.write(msg.files)], { type: "application/zip" });
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+  a.download = msg.folder.replace(/[^\w.-]+/g, "_") + "-saves-" + new Date().toISOString().slice(0, 10) + ".zip";
+  a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  setStatus("Exported " + msg.files.length + " file" + (msg.files.length === 1 ? "" : "s"));
+}
+$("importSaves").addEventListener("change", async e => {
+  const f = e.target.files[0]; e.target.value = "";
+  if (!f || !currentEntry || !currentFolder) return;
+  if (!confirm("Replace this game's save data with " + f.name + "? The game starts again.")) return;
+  let files;
+  try { files = await CrankedZip.read(new Uint8Array(await f.arrayBuffer())); }
+  catch (err) { setStatus("Could not read " + f.name + ": " + err.message); return; }
+  const prefix = currentFolder + "/"; // a zip of the folder itself is accepted too
+  if (files.length && files.every(x => x.path.startsWith(prefix))) files = files.map(x => ({ path: x.path.slice(prefix.length), data: x.data }));
+  running = false; updateButtons(); setStatus("Importing...");
+  worker.postMessage({ type: "importSaves", folder: currentFolder, files });
+});
+function savesImported(msg) {
+  if (!msg.ok) { setStatus("Import failed: " + msg.error); return; }
+  if (currentEntry) startGame(currentEntry);
+}
+
+// ---------- buttons: pause, fullscreen, screenshot, sound ----------
+function updateButtons() {
+  $("pause").disabled = !running; $("shot").disabled = !running; $("exportSaves").disabled = !running || !currentFolder;
+  $("importLabel").style.display = running && currentFolder ? "" : "none";
+  $("pause").textContent = paused ? "Resume" : "Pause";
+}
+function setPaused(on) {
+  if (!running || paused === on) return;
+  paused = on; screen.classList.toggle("paused", paused); updateButtons();
+  worker.postMessage({ type: paused ? "pause" : "resume" });
+}
+$("pause").onclick = () => setPaused(!paused);
+let hiddenPause = false; // a hidden tab pauses the game, and showing it again resumes it unless it was paused by hand
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden && running && !paused) { hiddenPause = true; setPaused(true); }
+  else if (!document.hidden && hiddenPause) { hiddenPause = false; setPaused(false); }
+});
+$("full").onclick = () => { if (document.fullscreenElement) document.exitFullscreen(); else screen.requestFullscreen().catch(() => {}); };
+$("shot").onclick = () => { // at least 800 pixels wide, at a whole multiple of the image
+  const lcd = $("lcd"), k = Math.max(1, Math.ceil(800 / lcd.width));
+  const c = document.createElement("canvas"); c.width = lcd.width * k; c.height = lcd.height * k;
+  const g = c.getContext("2d"); g.imageSmoothingEnabled = false; g.drawImage(lcd, 0, 0, c.width, c.height);
+  c.toBlob(blob => {
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+    a.download = (currentTitle || "cranked").replace(/[^\w-]+/g, "_") + "-" + new Date().toISOString().replace(/[:.]/g, "-") + ".png";
+    a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  });
+};
+muted = load("cranked.muted") === "1";
+$("mute").textContent = muted ? "Sound off" : "Sound on";
+$("mute").onclick = e => {
+  muted = !muted; e.target.textContent = muted ? "Sound off" : "Sound on"; store("cranked.muted", muted ? "1" : "0");
+  if (audio) { if (muted) audio.suspend(); else audio.resume(); }
+  ensureAudio();
+};
+
+// ---------- audio: an AudioWorklet fed by the worker over its own channel ----------
+async function connectAudio() {
+  if (audio || typeof AudioContext === "undefined") return;
+  audio = new AudioContext({ sampleRate: RATE });
+  const channel = new MessageChannel();
+  let worklet = false;
+  if (audio.audioWorklet) { // only in secure contexts (https, localhost)
+    try {
+      await audio.audioWorklet.addModule("audio-worklet.js");
+      audioNode = new AudioWorkletNode(audio, "cranked-audio", { outputChannelCount: [2] });
+      audioNode.connect(audio.destination);
+      audioNode.port.postMessage({ port: channel.port1 }, [channel.port1]);
+      worklet = true;
+    } catch (e) { console.warn("audio worklet", e); }
+  }
+  if (!worklet) { // the chunks played as scheduled buffers on this thread
+    let at = 0;
+    channel.port1.onmessage = m => {
+      const samples = m.data, frames = samples.length / 2;
+      const buffer = audio.createBuffer(2, frames, RATE);
+      const left = buffer.getChannelData(0), right = buffer.getChannelData(1);
+      for (let i = 0; i < frames; i++) { left[i] = samples[2 * i] / 32768; right[i] = samples[2 * i + 1] / 32768; }
+      const now = audio.currentTime;
+      if (at < now + 0.02 || at > now + 0.3) at = now + 0.05; // restart after an underrun or a stall
+      const source = audio.createBufferSource(); source.buffer = buffer; source.connect(audio.destination);
+      source.start(at); at += frames / RATE;
+    };
+  }
+  worker.postMessage({ type: "audioPort", port: channel.port2 }, [channel.port2]);
+  if (muted) audio.suspend();
+}
+function ensureAudio() { // browsers start audio only after a user gesture
+  if (audio && !muted && audio.state === "suspended") audio.resume().catch(() => {});
+}
+
+// ---------- input ----------
+function turn(degrees) { crank = ((crank + degrees) % 360 + 360) % 360; docked = false; sendInput(); }
+addEventListener("keydown", e => {
+  if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
+  if (e.code in BUTTONS) { buttons |= BUTTONS[e.code]; e.preventDefault(); sendInput(); }
+  else if (e.code === "Comma") turn(-10);
+  else if (e.code === "Period") turn(10);
+  else if (e.code === "KeyC") { docked = !docked; sendInput(); }
+  else if (e.code === "KeyP" && !e.repeat) setPaused(!paused);
+  ensureAudio();
+});
+addEventListener("keyup", e => { if (e.code in BUTTONS) { buttons &= ~BUTTONS[e.code]; sendInput(); } });
+addEventListener("blur", () => { buttons = 0; sendInput(); });
+screen.addEventListener("wheel", e => { e.preventDefault(); turn(e.deltaY / 4); }, { passive: false });
+screen.addEventListener("pointerdown", ensureAudio);
+
+// Touch controls (shown on touch screens): held buttons set their bits; dragging round the dial turns the crank
+let touchBits = 0;
+if (navigator.maxTouchPoints > 0) $("touch").classList.add("on");
+for (const el of document.querySelectorAll(".pad[data-bit]")) {
+  const bit = +el.dataset.bit;
+  const press = e => { e.preventDefault(); el.setPointerCapture(e.pointerId); touchBits |= bit; el.classList.add("down"); ensureAudio(); sendInput(); };
+  const release = () => { touchBits &= ~bit; el.classList.remove("down"); sendInput(); };
+  el.addEventListener("pointerdown", press);
+  for (const t of ["pointerup", "pointercancel", "lostpointercapture"]) el.addEventListener(t, release);
+}
+const dial = $("crankdial");
+function dialAngle(e) {
+  const r = dial.getBoundingClientRect();
+  return Math.atan2(e.clientX - (r.left + r.width / 2), -(e.clientY - (r.top + r.height / 2))) * 180 / Math.PI;
+}
+let dialLast = null;
+dial.addEventListener("pointerdown", e => { e.preventDefault(); dial.setPointerCapture(e.pointerId); dialLast = dialAngle(e); ensureAudio(); });
+dial.addEventListener("pointermove", e => {
+  if (dialLast === null) return;
+  const a = dialAngle(e); let d = a - dialLast; dialLast = a;
+  if (d > 180) d -= 360; if (d < -180) d += 360;
+  turn(d);
+});
+for (const t of ["pointerup", "pointercancel"]) dial.addEventListener(t, () => { dialLast = null; });
+
+// Gamepads (standard mapping), as the libretro core maps a RetroPad: the d-pad or left stick; the right face button
+// is A, the bottom one B; Start or Back the menu; the right stick points the crank and the shoulder buttons turn it
+let padBits = 0;
+function pollPads() {
+  let bits = 0, moved = false;
+  for (const pad of navigator.getGamepads ? navigator.getGamepads() : []) {
+    if (!pad || pad.mapping !== "standard") continue;
+    const on = i => pad.buttons[i] && pad.buttons[i].pressed;
+    const lx = pad.axes[0] || 0, ly = pad.axes[1] || 0; // the left stick works as the d-pad too
+    if (on(14) || lx < -0.5) bits |= 1; if (on(15) || lx > 0.5) bits |= 2; if (on(12) || ly < -0.5) bits |= 4; if (on(13) || ly > 0.5) bits |= 8;
+    if (on(0)) bits |= 16; if (on(1)) bits |= 32; if (on(9) || on(8)) bits |= 128;
+    const x = pad.axes[2] || 0, y = pad.axes[3] || 0;
+    if (x * x + y * y > 0.25) { crank = ((Math.atan2(x, -y) * 180 / Math.PI) + 360) % 360; docked = false; moved = true; }
+    if (on(4)) { crank = ((crank - 6) % 360 + 360) % 360; docked = false; moved = true; }
+    if (on(5)) { crank = (crank + 6) % 360; docked = false; moved = true; }
+  }
+  if (bits !== padBits || moved) { padBits = bits; sendInput(); }
+  if (bits) ensureAudio();
+}
+
+// ---------- the screen's look: colors and effects, drawn by the engine (ScreenEffects), kept in this browser ----------
+const COLOR_PRESETS = ["Playdate", "Bright room", "Paper", "Game Boy", "Amber", "High contrast"]; // as in ScreenEffects.cpp
+const LOOK_DEFAULT = { colors: 0, blend: false, grid: false, shadow: false, light: 0, tilt: false, scan: false, device: false };
+let look = { ...LOOK_DEFAULT }, tiltX = 0, tiltY = 0;
+try { Object.assign(look, JSON.parse(load("cranked.look") || "{}")); } catch (e) {}
+for (const [i, name] of COLOR_PRESETS.entries()) $("lookColors").append(new Option(name, i));
+const lookInputs = { colors: "lookColors", blend: "lookBlend", grid: "lookGrid", shadow: "lookShadow", light: "lookLight", tilt: "lookTilt", scan: "lookScan", device: "lookDevice" };
+function showLook() {
+  for (const [key, id] of Object.entries(lookInputs)) { const el = $(id); if (el.type === "checkbox") el.checked = look[key]; else el.value = look[key]; }
+}
+// the whole scale to draw at: the effects that work on parts of a pixel need the size the image is shown at
+function lookScale() {
+  if (!(look.grid || look.shadow || look.scan || look.device)) return 1;
+  const unit = look.device ? 630 : 400; // the drawn device's width (ScreenEffects::outputSize), or the screen's
+  const shown = $("lcd").getBoundingClientRect().width * (devicePixelRatio || 1);
+  return Math.min(4, Math.max(1, Math.ceil(shown / unit - 0.01)));
+}
+function sendLook() {
+  const flags = (look.blend ? 1 : 0) | (look.grid ? 2 : 0) | (look.shadow ? 4 : 0) | (look.scan ? 8 : 0) | (look.device ? 16 : 0);
+  const unit = look.device ? [630, 504] : [400, 240];
+  $("lcd").style.setProperty("--ar", (unit[0] / unit[1]).toFixed(4));
+  $("lcd").classList.toggle("device", look.device);
+  worker.postMessage({ type: "screen", screen: { colors: +look.colors, flags, light: +look.light, tiltX: look.tilt ? tiltX : 0, tiltY: look.tilt ? tiltY : 0, scale: lookScale() } });
+}
+function lookChanged() {
+  for (const [key, id] of Object.entries(lookInputs)) { const el = $(id); look[key] = el.type === "checkbox" ? el.checked : el.type === "range" ? +el.value : +el.value; }
+  store("cranked.look", JSON.stringify(look));
+  sendLook();
+}
+for (const id of Object.values(lookInputs)) $(id).addEventListener("input", lookChanged);
+$("lookReset").onclick = () => { look = { ...LOOK_DEFAULT }; showLook(); lookChanged(); };
+// a phone's tilt moves the room's light (iOS asks first, from the tap that turns it on)
+if (typeof DeviceOrientationEvent !== "undefined" && navigator.maxTouchPoints > 0) {
+  $("lookTiltLabel").hidden = false;
+  $("lookTilt").addEventListener("change", e => {
+    if (e.target.checked && typeof DeviceOrientationEvent.requestPermission === "function")
+      DeviceOrientationEvent.requestPermission().then(r => { if (r !== "granted") { e.target.checked = false; lookChanged(); } }).catch(() => {});
+  });
+  let lastTilt = 0;
+  addEventListener("deviceorientation", e => {
+    if (!look.tilt || !look.light || e.gamma === null) return;
+    tiltX = Math.max(-1, Math.min(1, e.gamma / 40)); // left and right
+    tiltY = Math.max(-1, Math.min(1, (e.beta - 45) / 40)); // toward and away, from a phone held at 45 degrees
+    const now = performance.now(); if (now - lastTilt > 50) { lastTilt = now; sendLook(); } // at most 20 times a second
+  });
+}
+new ResizeObserver(() => sendLook()).observe($("lcd")); // the scale follows the shown size
+showLook(); sendLook();
+
+// ---------- drawing: the newest frame from the worker, once per animation frame ----------
+let image = null, shownAt = 0, latestWidth = 400, latestHeight = 240;
+function draw(time) {
+  pollPads();
+  if (latest) {
+    const data = new Uint8ClampedArray(latest); latest = null;
+    const lcd = $("lcd");
+    if (lcd.width !== latestWidth || lcd.height !== latestHeight) { lcd.width = latestWidth; lcd.height = latestHeight; }
+    if (!image || image.width !== latestWidth || image.height !== latestHeight) image = new ImageData(latestWidth, latestHeight);
+    image.data.set(data); ctx2d.putImageData(image, 0, 0);
+    // drawn larger than shown: smoothed when shrunk, so the grid's lines do not come and go; else crisp
+    lcd.style.imageRendering = lcd.width > lcd.getBoundingClientRect().width * (devicePixelRatio || 1) + 1 ? "auto" : "pixelated";
+  }
+  dial.style.setProperty("--angle", crank + "deg");
+  if (running && !paused && time - shownAt > 500) { shownAt = time; setStatus("Running \u00b7 " + frameMs.toFixed(2) + " ms per step"); }
+  requestAnimationFrame(draw);
+}
+requestAnimationFrame(draw);
+
+// Installable and usable offline (a service worker needs https or localhost)
+if ("serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost" || location.hostname === "127.0.0.1"))
+  navigator.serviceWorker.register("sw.js").catch(e => console.warn("service worker", e));
+</script>
+</body>
+</html>

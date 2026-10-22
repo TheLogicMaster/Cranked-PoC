@@ -1,0 +1,13 @@
+{
+  "name": "Cranked",
+  "short_name": "Cranked",
+  "description": "Playdate games in the browser",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#171614",
+  "theme_color": "#1f1d1a",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

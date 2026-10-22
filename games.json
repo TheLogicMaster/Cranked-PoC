@@ -1,0 +1,356 @@
+{
+ "title": "Games",
+ "games": [
+  {
+   "title": "PDSnake",
+   "author": "Brett Chalupa",
+   "url": "games/pdsnake-1.2.pdx.zip",
+   "version": "1.2",
+   "license": "Public domain",
+   "source": "https://codeberg.org/brettchalupa/pdsnake",
+   "description": "Snake, with high scores"
+  },
+  {
+   "title": "PlayDators sample",
+   "author": "Aras Pranckevicius",
+   "url": "games/PlayDators_Sample.pdx.zip",
+   "version": "2025",
+   "license": "Unlicense (the author's code); bundled libraries MIT, zlib and public domain",
+   "source": "https://github.com/aras-p/playdators",
+   "description": "A small 3D runner (C)"
+  },
+  {
+   "title": "Godspeed",
+   "author": "Umut Seven",
+   "url": "games/godspeed-1.0.pdx.zip",
+   "version": "1.0",
+   "license": "MIT (code); CC BY 4.0 (art and music); CC0 (sound effects); Playdate font CC BY 4.0 (Panic Inc.)",
+   "source": "https://github.com/umutseven92/godspeed",
+   "description": "Keep a bus with a bomb on board speeding down a highway full of obstacles"
+  },
+  {
+   "title": "reSnake",
+   "author": "TNMM",
+   "url": "games/reSnake-1.0.2.pdx.zip",
+   "version": "1.0.2",
+   "license": "GPL-3.0-or-later (game and images); TNMM font by GGBotNet",
+   "source": "https://github.com/IGM0937/reSnake/tree/v1.0.2",
+   "description": "Snake, with a limited number of rewinds when you make a mistake"
+  },
+  {
+   "title": "1-Bit Fantasy",
+   "author": "Brett Chalupa",
+   "url": "games/1-BitFantasy-0.5.pdx.zip",
+   "version": "0.5",
+   "license": "Public domain (Unlicense); sprites CC0 (Hexany, Kenney); music MIDI from BitMidi",
+   "source": "https://github.com/brettchalupa/1_bit_fantasy",
+   "description": "A JRPG prototype"
+  },
+  {
+   "title": "Simply Sudoku",
+   "author": "Connor Luebbehusen",
+   "url": "games/SimplySudoku-1.1.0.pdx.zip",
+   "version": "1.1.0",
+   "license": "MIT",
+   "source": "https://github.com/cluebbehusen/simply-sudoku",
+   "description": "Sudoku"
+  },
+  {
+   "title": "Snooze or Lose",
+   "author": "Team Snooze",
+   "url": "games/Snooze-1.1.0.pdx.zip",
+   "version": "1.1.0",
+   "license": "CC0 1.0 (public domain)",
+   "source": "https://github.com/britalmeida/project_snooze",
+   "description": "A PlayJam 4 game on the theme \"Your Time Is Up\""
+  },
+  {
+   "title": "Singularity",
+   "author": "Rani367",
+   "url": "games/Singularity-1.0.0.pdx.zip",
+   "version": "1.0.0",
+   "license": "MIT",
+   "source": "https://github.com/Rani367/singularity",
+   "description": "Orbit a black hole, with the light bending in real time (C)"
+  },
+  {
+   "title": "MazeThingie",
+   "author": "Willems Davy (joyrider3774)",
+   "url": "games/MazeThingie-1.0.pdx.zip",
+   "version": "1.0",
+   "license": "MIT; Space Mono font OFL 1.1",
+   "source": "https://github.com/joyrider3774/mazethingie_playdate",
+   "description": "Generated mazes to find your way through (C)"
+  },
+  {
+   "title": "Formula 1 Game & Watch",
+   "author": "Willems Davy (joyrider3774)",
+   "url": "games/Formula1-1.4.pdx.zip",
+   "version": "1.4",
+   "license": "MIT",
+   "source": "https://github.com/joyrider3774/formula1_playdate",
+   "description": "An LCD-style racing game: dodge the traffic (C)"
+  },
+  {
+   "title": "Train to Ciampino",
+   "author": "Giorgio Pomettini",
+   "url": "games/TrainToCiampino.pdx.zip",
+   "version": "2024",
+   "license": "MIT",
+   "source": "https://github.com/pomettini/ggj-2024",
+   "description": "Crank the train up to speed, but not so far that it explodes (Global Game Jam 2024, Rust)"
+  },
+  {
+   "title": "Asheteroids",
+   "author": "Panic Inc. (Playdate SDK example)",
+   "url": "games/sdk-Asheteroids.pdx.zip",
+   "version": "SDK 3.1.1",
+   "license": "BSD Zero Clause (0BSD)",
+   "source": "https://play.date/dev/",
+   "description": "An example game from the Playdate SDK"
+  },
+  {
+   "title": "FlippyFish",
+   "author": "Panic Inc. (Playdate SDK example)",
+   "url": "games/sdk-FlippyFish.pdx.zip",
+   "version": "SDK 3.1.1",
+   "license": "BSD Zero Clause (0BSD)",
+   "source": "https://play.date/dev/",
+   "description": "An example game from the Playdate SDK"
+  },
+  {
+   "title": "Hammer Down",
+   "author": "Panic Inc. (Playdate SDK example)",
+   "url": "games/sdk-HammerDown.pdx.zip",
+   "version": "SDK 3.1.1",
+   "license": "BSD Zero Clause (0BSD)",
+   "source": "https://play.date/dev/",
+   "description": "An example game from the Playdate SDK"
+  },
+  {
+   "title": "Level 1-1",
+   "author": "Panic Inc. (Playdate SDK example)",
+   "url": "games/sdk-Level1-1.pdx.zip",
+   "version": "SDK 3.1.1",
+   "license": "BSD Zero Clause (0BSD)",
+   "source": "https://play.date/dev/",
+   "description": "An example game from the Playdate SDK"
+  },
+  {
+   "title": "2020",
+   "author": "Panic Inc. (Playdate SDK example)",
+   "url": "games/sdk-2020.pdx.zip",
+   "version": "SDK 3.1.1",
+   "license": "BSD Zero Clause (0BSD)",
+   "source": "https://play.date/dev/",
+   "description": "An example game from the Playdate SDK"
+  },
+  {
+   "title": "DrumMachine",
+   "author": "Panic Inc. (Playdate SDK example)",
+   "url": "games/sdk-DrumMachine.pdx.zip",
+   "version": "SDK 3.1.1",
+   "license": "BSD Zero Clause (0BSD)",
+   "source": "https://play.date/dev/",
+   "description": "An example game from the Playdate SDK"
+  },
+  {
+   "title": "MIDIPlayer",
+   "author": "Panic Inc. (Playdate SDK example)",
+   "url": "games/sdk-MIDIPlayer.pdx.zip",
+   "version": "SDK 3.1.1",
+   "license": "BSD Zero Clause (0BSD)",
+   "source": "https://play.date/dev/",
+   "description": "An example game from the Playdate SDK"
+  },
+  {
+   "title": "Pathfinder",
+   "author": "Panic Inc. (Playdate SDK example)",
+   "url": "games/sdk-Pathfinder.pdx.zip",
+   "version": "SDK 3.1.1",
+   "license": "BSD Zero Clause (0BSD)",
+   "source": "https://play.date/dev/",
+   "description": "An example game from the Playdate SDK"
+  },
+  {
+   "title": "SpriteCollisionMasks",
+   "author": "Panic Inc. (Playdate SDK example)",
+   "url": "games/sdk-SpriteCollisionMasks.pdx.zip",
+   "version": "SDK 3.1.1",
+   "license": "BSD Zero Clause (0BSD)",
+   "source": "https://play.date/dev/",
+   "description": "An example game from the Playdate SDK"
+  },
+  {
+   "title": "Hello World (C)",
+   "author": "Panic Inc. (Playdate SDK example)",
+   "url": "games/sdk-c-HelloWorld.pdx.zip",
+   "version": "SDK 3.1.1",
+   "license": "BSD Zero Clause (0BSD)",
+   "source": "https://play.date/dev/",
+   "description": "A C example from the Playdate SDK, on the ARM interpreter"
+  },
+  {
+   "title": "Life (C)",
+   "author": "Panic Inc. (Playdate SDK example)",
+   "url": "games/sdk-c-Life.pdx.zip",
+   "version": "SDK 3.1.1",
+   "license": "BSD Zero Clause (0BSD)",
+   "source": "https://play.date/dev/",
+   "description": "A C example from the Playdate SDK, on the ARM interpreter"
+  },
+  {
+   "title": "Particles (C)",
+   "author": "Panic Inc. (Playdate SDK example)",
+   "url": "games/sdk-c-Particles.pdx.zip",
+   "version": "SDK 3.1.1",
+   "license": "BSD Zero Clause (0BSD)",
+   "source": "https://play.date/dev/",
+   "description": "A C example from the Playdate SDK, on the ARM interpreter"
+  },
+  {
+   "title": "Sprite Game (C)",
+   "author": "Panic Inc. (Playdate SDK example)",
+   "url": "games/sdk-c-SpriteGame.pdx.zip",
+   "version": "SDK 3.1.1",
+   "license": "BSD Zero Clause (0BSD)",
+   "source": "https://play.date/dev/",
+   "description": "A C example from the Playdate SDK, on the ARM interpreter"
+  },
+  {
+   "title": "Exposure (C)",
+   "author": "Panic Inc. (Playdate SDK example)",
+   "url": "games/sdk-c-Exposure.pdx.zip",
+   "version": "SDK 3.1.1",
+   "license": "BSD Zero Clause (0BSD)",
+   "source": "https://play.date/dev/",
+   "description": "A C example from the Playdate SDK, on the ARM interpreter"
+  },
+  {
+   "title": "3D library (C)",
+   "author": "Panic Inc. (Playdate SDK example)",
+   "url": "games/sdk-c-3Dlibrary.pdx.zip",
+   "version": "SDK 3.1.1",
+   "license": "BSD Zero Clause (0BSD)",
+   "source": "https://play.date/dev/",
+   "description": "A C example from the Playdate SDK, on the ARM interpreter"
+  },
+  {
+   "title": "Tilemap (C)",
+   "author": "Panic Inc. (Playdate SDK example)",
+   "url": "games/sdk-c-Tilemap.pdx.zip",
+   "version": "SDK 3.1.1",
+   "license": "BSD Zero Clause (0BSD)",
+   "source": "https://play.date/dev/",
+   "description": "A C example from the Playdate SDK, on the ARM interpreter"
+  },
+  {
+   "title": "Sprite Collisions (C)",
+   "author": "Panic Inc. (Playdate SDK example)",
+   "url": "games/sdk-c-SpriteCollisions.pdx.zip",
+   "version": "SDK 3.1.1",
+   "license": "BSD Zero Clause (0BSD)",
+   "source": "https://play.date/dev/",
+   "description": "A C example from the Playdate SDK, on the ARM interpreter"
+  },
+  {
+   "title": "BrickCrusher 2020",
+   "author": "aliasaria",
+   "version": "2020",
+   "license": "Not stated",
+   "source": "https://github.com/aliasaria/BrickCrusher2020",
+   "page": "https://aliasaria.itch.io/brickcrusher-2020-for-playdate",
+   "description": "A brick breaker (free on itch.io)"
+  },
+  {
+   "title": "UPWARD",
+   "author": "DanB91",
+   "version": "1.1",
+   "license": "GPL-3.0 (code); a port of Matthias Falk's PICO-8 game",
+   "source": "https://github.com/DanB91/UPWARD-for-Playdate",
+   "page": "https://danb91.itch.io/upward-for-playdate",
+   "description": "A short, hard 1-bit puzzle platformer (free on itch.io)"
+  },
+  {
+   "title": "Simple Snake",
+   "author": "Mocchi Mochi",
+   "version": "2",
+   "license": "MIT; the music's source is not stated",
+   "source": "https://github.com/Mocchi-Mochi/playdate-snake-game",
+   "page": "https://tauchme.itch.io/simple-snake-playdate",
+   "description": "Snake (free on itch.io)"
+  },
+  {
+   "title": "Rachel's Game Pack",
+   "author": "Moosadee",
+   "version": "2",
+   "license": "Not stated",
+   "source": "https://gitlab.com/moosadee/moosadee-playdate-games",
+   "page": "https://moosadee.itch.io/rachels-playdate-game-pack",
+   "description": "Small games in one pack (pay what you want on itch.io)"
+  },
+  {
+   "title": "Waternet",
+   "author": "Willems Davy (joyrider3774)",
+   "version": "1.2",
+   "license": "MIT; two skins are based on others' work",
+   "source": "https://github.com/joyrider3774/waternet_playdate",
+   "page": "https://github.com/joyrider3774/waternet_playdate/releases",
+   "description": "Connect the water pipes (C)"
+  },
+  {
+   "title": "Checkers",
+   "author": "Willems Davy (joyrider3774)",
+   "version": "1.1",
+   "license": "MIT; Kenney sounds CC0; the music sequence's terms are not stated",
+   "source": "https://github.com/joyrider3774/checkers_playdate",
+   "page": "https://github.com/joyrider3774/checkers_playdate/releases",
+   "description": "Checkers (C++)"
+  },
+  {
+   "title": "Worm",
+   "author": "Willems Davy (joyrider3774)",
+   "version": "1.1",
+   "license": "MIT (the code)",
+   "source": "https://github.com/joyrider3774/worm_playdate",
+   "page": "https://github.com/joyrider3774/worm_playdate/releases",
+   "description": "Steer the worm through the level with the buttons, in five modes (C)"
+  },
+  {
+   "title": "Znax",
+   "author": "Willems Davy (joyrider3774)",
+   "version": "1.0",
+   "license": "MIT (the code)",
+   "source": "https://github.com/joyrider3774/znax_playdate",
+   "page": "https://github.com/joyrider3774/znax_playdate/releases",
+   "description": "Pick four same-coloured blocks at the corners of a rectangle to clear it, against the clock (C)"
+  },
+  {
+   "title": "PlayPong",
+   "author": "Cesar Rincon",
+   "version": "0.9.1-beta",
+   "license": "MIT; free assets by others, terms not stated",
+   "source": "https://github.com/knightfox75/PlayPong",
+   "page": "https://github.com/knightfox75/PlayPong/releases",
+   "description": "Pong (C)"
+  },
+  {
+   "title": "Crank The World",
+   "author": "Aras Pranckevicius",
+   "version": "2024",
+   "license": "Unlicense (the code); music terms not stated",
+   "source": "https://github.com/aras-p/demo-pd-cranktheworld",
+   "page": "https://github.com/aras-p/demo-pd-cranktheworld",
+   "description": "A demoscene demo (C)"
+  },
+  {
+   "title": "Factory Farming tech demo",
+   "author": "Tim Martin",
+   "version": "-",
+   "license": "MIT (code); art, music and fonts under their own licenses",
+   "source": "https://github.com/timboe/FactoryFarming",
+   "page": "https://timboe.itch.io/factory-farming",
+   "description": "A factory and farming builder; the free tech demo (C)"
+  }
+ ]
+}
