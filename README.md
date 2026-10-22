@@ -179,7 +179,8 @@ keyboards map as on the desktop. C games run on the ARM interpreter, as in the l
 
 `scripts/build.sh dos` builds `CRANKED.EXE`, a 32-bit protected mode DOS program (DJGPP), and puts it in `dist/dos/`
 with `HDPMI32.EXE` (the HX DOS extender's DPMI host, freeware, built from source by `scripts/build-hdpmi.sh`),
-`CRANK.BAT`, which starts the host and then Cranked, and a `README.TXT` for the user. The compiler is GCC 14.2 for
+`CRANK.BAT`, which starts the host and then Cranked, `DOSBOX-X.CONF`, the DOSBox-X settings to run it with, and a
+`README.TXT` for the user. The compiler is GCC 14.2 for
 DJGPP, which `scripts/build-djgpp.sh [folder]` builds with [jwt27/build-gcc](https://github.com/jwt27/build-gcc)
 (about half an hour; the prebuilt DJGPP releases are too old for `<format>`).
 
@@ -191,8 +192,13 @@ from the start). Games are opened from the command line (`CRANK game.zip`); a lo
 (DOSLFN) is recommended, since save data go into folders named after bundle IDs. C games run on the ARM
 interpreter, so even a recent PC booted into DOS runs only light ones at full speed (the SDK's Life example runs
 about 34 million ARM instructions a frame, and the interpreter does about 5 million a second in DOSBox-X on a modern
-host); Lua games are lighter, and simple ones run at full speed in DOSBox-X. Tested in DOSBox-X; `CRANKED_LOG=<file>` writes the log and the game's console output to a
-file.
+host); Lua games are lighter, and simple ones run at full speed in DOSBox-X. `CRANKED_LOG=<file>` writes the log
+and the game's console output to a file.
+
+In DOSBox-X, where it is tested, run `dosbox-x -conf DOSBOX-X.CONF` in the folder: it becomes drive C:. The
+settings that matter are more memory than the default 16 MB, full speed, long file names (DOSBox-X reports DOS 5,
+so its "auto" leaves them off) and no prompt for a working folder (a first run asks, and the snap's folder picker
+can fail); the rest are DOSBox-X's defaults, written out.
 
 ## Making a release
 

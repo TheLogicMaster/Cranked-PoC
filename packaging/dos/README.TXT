@@ -23,6 +23,10 @@ What it needs
 
 Running
 -------
+In DOSBox-X, DOSBOX-X.CONF has the settings to use: run DOSBox-X from this folder
+with  dosbox-x -conf DOSBOX-X.CONF  and this folder becomes drive C:. Its
+comments say which settings matter (more memory, full speed, long file names).
+
     CRANK game.zip [options]
 
 The game is a zipped .pdx bundle (or a .pdx folder, where long file names are

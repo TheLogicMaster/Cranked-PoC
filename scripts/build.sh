@@ -189,7 +189,7 @@ for t in "${TARGETS[@]}"; do
       "$ROOT/scripts/build-hdpmi.sh" "$ROOT/build/hdpmi" > /dev/null
       mkdir -p "$ROOT/dist/dos"
       "$DJGPP_PREFIX/bin/i386-pc-msdosdjgpp-strip" -o "$ROOT/dist/dos/CRANKED.EXE" "$ROOT/build/dos/dos/cranked.exe"
-      cp "$ROOT/build/hdpmi/HDPMI32.EXE" "$ROOT/packaging/dos/README.TXT" "$ROOT/packaging/dos/CRANK.BAT" "$ROOT/dist/dos/"
+      cp "$ROOT/build/hdpmi/HDPMI32.EXE" "$ROOT/packaging/dos/README.TXT" "$ROOT/packaging/dos/CRANK.BAT" "$ROOT/packaging/dos/DOSBOX-X.CONF" "$ROOT/dist/dos/"
       echo "dist/dos:"; ls "$ROOT/dist/dos"
       ;;
     appimage)
