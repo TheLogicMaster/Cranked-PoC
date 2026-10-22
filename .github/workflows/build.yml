@@ -4,6 +4,8 @@
 # with the other jobs. The web build can be published to the gh-pages branch from the default branch.
 # Every job's output is uploaded or published, so the assets are prepared for distribution (SDK_ASSETS=fonts): only
 # the Playdate fonts (CC BY 4.0) come from the SDK, and its other assets are replaced by plain stand-ins.
+# With "Release" ticked and a version given, the builds that succeed are published as a GitHub release: the tag is
+# made on the commit the run built, once the builds are done (scripts/package-release.sh names the files).
 name: build
 
 on:
@@ -45,6 +47,18 @@ on:
         description: DOS build (the DJGPP compiler is built once and cached, about 40 minutes)
         type: boolean
         default: false
+      release:
+        description: Publish the builds as a GitHub release (needs Version)
+        type: boolean
+        default: false
+      version:
+        description: Release version, the tag and the release's name (v1, v0.2, v0.2-rc1, ...)
+        type: string
+        default: ""
+      prerelease:
+        description: Mark the release as a pre-release
+        type: boolean
+        default: false
 
 env:
   SDK_URL: https://download.panic.com/playdate_sdk/Linux/PlaydateSDK-3.1.1.tar.gz
@@ -55,6 +69,21 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      # before anything is built (every build needs this job): a bad or taken version stops the run here
+      - name: Check the release version
+        if: inputs.release
+        env:
+          VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! [[ "$VERSION" =~ ^v[0-9]+(\.[0-9]+)*(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::Release needs a version like v1, v0.2 or v0.2-rc1 (got '$VERSION')"
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/$VERSION" > /dev/null || gh release view "$VERSION" > /dev/null 2>&1; then
+            echo "::error::$VERSION is already a tag or a release"
+            exit 1
+          fi
       - name: Playdate SDK 3.1.1 (for its assets)
         run: |
           curl -sSL "$SDK_URL" -o sdk.tar.gz
@@ -295,3 +324,31 @@ jobs:
           publish_dir: public
           publish_branch: gh-pages
           force_orphan: true
+
+  # the builds that succeeded, as a release (the experimental ones are left out when they fail)
+  release:
+    needs: [sdk-assets, native, flatpak, web, android, android-libretro, dos]
+    if: >-
+      always() && !cancelled() && inputs.release && needs.sdk-assets.result == 'success' &&
+      needs.native.result != 'failure' && needs.flatpak.result != 'failure' && needs.web.result != 'failure'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Package
+        run: scripts/package-release.sh artifacts release
+      - name: Publish
+        env:
+          VERSION: ${{ inputs.version }}
+          PRERELEASE: ${{ inputs.prerelease }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="Built from $(git rev-parse --short HEAD), with Cranked $(tr -d ' \n\r' < cranked.commit | cut -c1-12) and the patch series in patches/."
+          flags=()
+          [ "$PRERELEASE" = true ] && flags+=(--prerelease)
+          gh release create "$VERSION" release/* --target "$GITHUB_SHA" --title "Cranked PoC $VERSION" \
+            --notes "$notes" --generate-notes "${flags[@]}"

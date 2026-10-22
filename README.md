@@ -61,7 +61,7 @@ The games shown are [Singularity](https://github.com/Rani367/singularity) by Ran
 | `packaging/` | The DOS build's README and batch file (`dos/`), the Flatpak manifest, desktop entry, icon, the libretro core's RetroArch info file, and the optional download proxy (`download-proxy/`) |
 | `site/` | The hosted site's settings (`site.json`), the games it hosts (`games.tsv`) and the games it links to (`links.tsv`) |
 | `docs/screenshots/` | The pictures in this file |
-| `.github/workflows/` | Builds the targets on Linux, Windows and macOS, and publishes the web build to the `gh-pages` branch; it runs when started by hand (Actions > build > Run workflow), with a checkbox per target |
+| `.github/workflows/` | Builds the targets on Linux, Windows and macOS, publishes the web build to the `gh-pages` branch, and makes releases; it runs when started by hand (Actions > build > Run workflow), with a checkbox per target |
 
 The Playdate SDK is not included. Its assets are taken from your own copy of SDK 3.1.1 at build time.
 
@@ -193,6 +193,28 @@ interpreter, so even a recent PC booted into DOS runs only light ones at full sp
 about 34 million ARM instructions a frame, and the interpreter does about 5 million a second in DOSBox-X on a modern
 host); Lua games are lighter, and simple ones run at full speed in DOSBox-X. Tested in DOSBox-X; `CRANKED_LOG=<file>` writes the log and the game's console output to a
 file.
+
+## Making a release
+
+Run the workflow by hand (Actions > build > Run workflow) with the targets to include ticked, **Release** ticked
+and a **Version** such as `v0.2` (or `v0.2-rc1`; tick **Pre-release** to mark it as one). The version is checked
+first: a malformed one, or one that is already a tag or a release, stops the run before anything is built. When
+the builds are done, the release job tags the commit the run built with the version and publishes a release named
+"Cranked PoC <version>" with GitHub's list of changes since the previous release. If the Linux, Windows, macOS,
+Flatpak or web build fails, nothing is released; the experimental ones (Android, the Android libretro core, DOS) are
+left out when they fail.
+
+`scripts/package-release.sh` turns the builds into the release's files, and runs on artifacts downloaded by hand
+too:
+
+| File | What it is |
+| --- | --- |
+| `Cranked-PoC-x86_64.AppImage`, `Cranked-PoC-x86_64.flatpak` | The Linux desktop app, packaged |
+| `Cranked-PoC-linux-x86_64.zip`, `Cranked-PoC-windows-x64.zip` | The desktop app and the libretro cores, each with the JIT and as the interpreter build (`-nojit`) |
+| `Cranked-PoC-macOS.zip`, `Cranked-PoC-macOS-libretro.zip` | The macOS app, and the libretro cores |
+| `Cranked-PoC-web.zip` | The web build, to host (see below) |
+| `Cranked-PoC.apk`, `Cranked-PoC-android-libretro.zip` | The Android app, and the libretro core for Android |
+| `Cranked-PoC-dos.zip` | The DOS build |
 
 ## Hosting the web build
 
