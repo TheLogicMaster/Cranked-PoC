@@ -45,7 +45,7 @@ index 31cc9ce..f6e4e0d 100644
      )
  endif ()
 diff --git a/desktop/main.cpp b/desktop/main.cpp
-index 623038a..d694181 100644
+index 623038a..7651551 100644
 --- a/desktop/main.cpp
 +++ b/desktop/main.cpp
 @@ -1,4 +1,5 @@
@@ -73,7 +73,7 @@ index 623038a..d694181 100644
  
      template<typename T>
      bool tryGetSetting(const string &name, T &out) {
-@@ -42,25 +48,155 @@ struct Userdata {
+@@ -42,25 +48,173 @@ struct Userdata {
      }
  };
  
@@ -159,6 +159,23 @@ index 623038a..d694181 100644
 +    return "";
 +}
 +
++// A folder that exists and takes a new file (a probe file is made and removed)
++bool writableFolder(const fs::path &folder) {
++    std::error_code ec;
++    if (!fs::is_directory(folder, ec))
++        return false;
++    auto probe = folder / ".cranked-write-test";
++    bool ok = (bool) std::ofstream(probe, std::ios::binary | std::ios::app);
++    fs::remove(probe, ec);
++    return ok;
++}
++
++// A file that exists and can be written (opened for appending, which does not change it)
++bool writableFile(const fs::path &file) {
++    std::error_code ec;
++    return fs::is_regular_file(file, ec) and (bool) std::ofstream(file, std::ios::binary | std::ios::app);
++}
++
 +void addRecent(vector<string> &recent, const string &path) {
 +    std::erase(recent, path);
 +    recent.insert(recent.begin(), path);
@@ -211,14 +228,15 @@ index 623038a..d694181 100644
      if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO/* | SDL_INIT_GAMECONTROLLER*/)) // Initializing controller support takes several seconds...
          throw CrankedError("Failed to init SDL: {}", SDL_GetError());
  
-+    // where settings and save data live: ./appData and ./imgui.ini when they exist, else the user's
-+    // data folder (SDL's preference path), so a packaged or wrapped game does not write next to wherever it was started
++    // where settings and save data live: ./appData and ./imgui.ini when they exist and can be written, else the
++    // user's data folder (SDL's preference path), so a packaged or wrapped game does not write next to wherever it
++    // was started. Writable, as a sandbox (the Flatpak's read-only home) can see an appData folder another build made.
 +    std::error_code fsError;
 +    fs::path userFolder = sdlPath(SDL_GetPrefPath("Cranked", "Proof of Concept"));
 +    if (userFolder.empty())
 +        userFolder = ".";
-+    fs::path dataFolder = !dataOption.empty() ? fs::path(dataOption) : fs::exists("appData", fsError) ? fs::path("appData") : userFolder / "Data";
-+    static string iniPath = fs::exists("imgui.ini", fsError) ? string("imgui.ini") : (userFolder / "cranked.ini").string();
++    fs::path dataFolder = !dataOption.empty() ? fs::path(dataOption) : writableFolder("appData") ? fs::path("appData") : userFolder / "Data";
++    static string iniPath = writableFile("imgui.ini") ? string("imgui.ini") : (userFolder / "cranked.ini").string();
 +
 +    // a game inside the executable, or beside it, is the game to play (a game named on the command line wins)
 +    bool wrapped = false;
@@ -236,7 +254,7 @@ index 623038a..d694181 100644
  #ifdef SDL_HINT_IME_SHOW_UI
      SDL_SetHint(SDL_HINT_IME_SHOW_UI, "1");
  #endif
-@@ -79,7 +215,8 @@ int main(int argc, const char *args[]) {
+@@ -79,7 +233,8 @@ int main(int argc, const char *args[]) {
  
      auto windowFlags = (SDL_WindowFlags) (SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
      // Todo: If window starts small, it squishes saved window positions
@@ -246,7 +264,7 @@ index 623038a..d694181 100644
      if (!window)
          throw CrankedError("Failed to create SDL window: {}", SDL_GetError());
      SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_PRESENTVSYNC | SDL_RENDERER_ACCELERATED);
-@@ -89,7 +226,9 @@ int main(int argc, const char *args[]) {
+@@ -89,7 +244,9 @@ int main(int argc, const char *args[]) {
      IMGUI_CHECKVERSION();
      auto imguiContext = ImGui::CreateContext();
      ImGuiIO& io = ImGui::GetIO();
@@ -257,7 +275,7 @@ index 623038a..d694181 100644
  
      ImGui::StyleColorsLight();
  
-@@ -170,6 +309,21 @@ int main(int argc, const char *args[]) {
+@@ -170,6 +327,21 @@ int main(int argc, const char *args[]) {
                  userdata->tryGetSetting("ShowWindow" + string(magic_enum::enum_name(value)), shown);
                  userdata->windowStates[value] = shown;
              }
@@ -279,7 +297,7 @@ index 623038a..d694181 100644
          };
          settingsHandler.WriteAllFn = [](ImGuiContext *ctx, ImGuiSettingsHandler *handler, ImGuiTextBuffer *buf) {
              auto userdata = (Userdata *)handler->UserData;
-@@ -185,6 +339,17 @@ int main(int argc, const char *args[]) {
+@@ -185,6 +357,17 @@ int main(int argc, const char *args[]) {
                  auto value = magic_enum::enum_value<Windows>(i);
                  userdata->settings["ShowWindow" + string(magic_enum::enum_name(value))] = userdata->windowStates[value];
              }
@@ -297,7 +315,7 @@ index 623038a..d694181 100644
  
              buf->append("[Cranked][Settings]\n");
              for (const auto &entry : userdata->settings) {
-@@ -203,9 +368,33 @@ int main(int argc, const char *args[]) {
+@@ -203,9 +386,33 @@ int main(int argc, const char *args[]) {
          imguiContext->SettingsHandlers.push_back(settingsHandler);
      }
  
@@ -334,7 +352,7 @@ index 623038a..d694181 100644
  
      auto getWindowOpen = [&](Windows w) -> bool & { return userdata.windowStates[w]; };
  
-@@ -221,9 +410,32 @@ int main(int argc, const char *args[]) {
+@@ -221,9 +428,32 @@ int main(int argc, const char *args[]) {
      int newScale = 1;
      bool firstFrame = true;
      bool requestedStart = false;
@@ -367,7 +385,7 @@ index 623038a..d694181 100644
      // Todo: Extract the following disaster to separate functions
      auto callback = [&](Cranked &cranked){
          if (audioDevice) {
-@@ -240,13 +452,69 @@ int main(int argc, const char *args[]) {
+@@ -240,13 +470,69 @@ int main(int argc, const char *args[]) {
                  exited = true;
                  cranked.terminate();
              }
@@ -441,7 +459,7 @@ index 623038a..d694181 100644
          buttonInputs = 0;
  
          io.FontGlobalScale = scale;
-@@ -258,10 +526,28 @@ int main(int argc, const char *args[]) {
+@@ -258,10 +544,28 @@ int main(int argc, const char *args[]) {
          if (firstFrame) {
              newScale = (int)scale;
              firstFrame = false;
@@ -471,7 +489,7 @@ index 623038a..d694181 100644
                  // Todo: Clean this up (Different menu? Termination should not be necessary) (Also just doesn't work correctly at preset)
                  if (ImGui::MenuItem(cranked.state == Cranked::State::Stopped ? "Start" : cranked.state == Cranked::State::Stopping ? "Terminate" : "Stop")) {
                      switch (cranked.state) {
-@@ -281,6 +567,11 @@ int main(int argc, const char *args[]) {
+@@ -281,6 +585,11 @@ int main(int argc, const char *args[]) {
                  ImGui::EndMenu();
              }
              if (ImGui::BeginMenu("View")) {
@@ -483,7 +501,7 @@ index 623038a..d694181 100644
                  if (ImGui::SliderInt("Scale", &newScale, 1, 6, "%dx", ImGuiSliderFlags_NoInput))
                      wasScaling = true;
                  ImGui::MenuItem("Show Debug", nullptr, &getWindowOpen(Windows::Debug));
-@@ -298,8 +589,52 @@ int main(int argc, const char *args[]) {
+@@ -298,8 +607,52 @@ int main(int argc, const char *args[]) {
                  scale = (float)newScale;
                  wasScaling = false;
              }
@@ -536,7 +554,7 @@ index 623038a..d694181 100644
  
          // ImGui::ShowDemoWindow();
  
-@@ -307,15 +642,55 @@ int main(int argc, const char *args[]) {
+@@ -307,15 +660,55 @@ int main(int argc, const char *args[]) {
  
          // Todo: Performance/stats window (Heap usage, frame times, program size), or just throw them around
  
@@ -595,7 +613,7 @@ index 623038a..d694181 100644
          if (getWindowOpen(Windows::Debug)) {
              ImGui::Begin("Debug", &getWindowOpen(Windows::Debug), ImGuiWindowFlags_None);
  
-@@ -575,28 +950,75 @@ int main(int argc, const char *args[]) {
+@@ -575,28 +968,75 @@ int main(int argc, const char *args[]) {
      };
      cranked.config.updateCallback = callback;
      cranked.config.debugPort = debugPort;
