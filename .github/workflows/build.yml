@@ -92,7 +92,7 @@ jobs:
         run: |
           mkdir -p staging/core/resources
           scripts/prepare-sdk-assets.sh --distributable "$PWD/sdk" "$PWD/staging"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sdk-assets
           path: staging/core/resources
@@ -129,7 +129,7 @@ jobs:
       - name: Cranked at the pinned commit, patched
         shell: bash
         run: scripts/fetch-cranked.sh
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: sdk-assets
           path: cranked/core/resources
@@ -163,10 +163,28 @@ jobs:
           mkdir -p dist/packages
           scripts/wrap-game.sh dist/desktop/cranked_desktop none dist/packages/Cranked.app
           (cd dist/packages && zip -qry Cranked-PoC-macOS.zip Cranked.app && rm -rf Cranked.app)
-      - uses: actions/upload-artifact@v4
+      # the main file on its own, not zipped (the AppImage, the Windows app, the macOS app's zip)
+      - name: The main file
+        id: main
+        run: |
+          case "${{ runner.os }}" in
+            Linux) f=dist/packages/Cranked-PoC-x86_64.AppImage ;;
+            Windows) f=dist/Cranked-PoC-windows-x64.exe; cp dist/desktop/cranked_desktop.exe "$f" ;;
+            macOS) f=dist/packages/Cranked-PoC-macOS.zip ;;
+          esac
+          echo "file=$f" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v7
+        with:
+          path: ${{ steps.main.outputs.file }}
+          archive: false
+      # the rest, zipped: the desktop app and the libretro cores, with the JIT and as the interpreter build
+      - uses: actions/upload-artifact@v7
         with:
           name: cranked-poc-${{ runner.os }}
-          path: dist
+          path: |
+            dist
+            !dist/packages
+            !dist/*.exe
 
   flatpak:
     needs: native
@@ -177,7 +195,7 @@ jobs:
       options: --privileged
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: cranked-poc-Linux
           path: dist
@@ -197,7 +215,7 @@ jobs:
       - name: Cranked at the pinned commit, patched
         shell: bash
         run: scripts/fetch-cranked.sh
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: sdk-assets
           path: cranked/core/resources
@@ -206,7 +224,7 @@ jobs:
           version: 3.1.52
       - name: Build
         run: sudo apt-get install -y ninja-build && scripts/build.sh web
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: cranked-poc-web
           path: dist/web
@@ -221,7 +239,7 @@ jobs:
       - name: Cranked at the pinned commit, patched
         shell: bash
         run: scripts/fetch-cranked.sh
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: sdk-assets
           path: cranked/core/resources
@@ -229,7 +247,7 @@ jobs:
         run: |
           sudo apt-get install -y ninja-build
           scripts/build.sh libretro-android
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: cranked-poc-android-libretro
           path: dist/libretro-android
@@ -251,7 +269,7 @@ jobs:
       - name: Cranked at the pinned commit, patched
         shell: bash
         run: scripts/fetch-cranked.sh
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: sdk-assets
           path: cranked/core/resources
@@ -259,10 +277,10 @@ jobs:
         run: |
           sudo apt-get install -y ninja-build
           scripts/build.sh android
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
-          name: cranked-poc-android
-          path: dist/android
+          path: dist/android/Cranked-PoC.apk
+          archive: false
 
   dos:
     needs: sdk-assets
@@ -284,13 +302,13 @@ jobs:
       - name: Cranked at the pinned commit, patched
         shell: bash
         run: scripts/fetch-cranked.sh
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: sdk-assets
           path: cranked/core/resources
       - name: Build the DOS front end (interpreter)
         run: DJGPP_PREFIX=~/djgpp scripts/build.sh dos
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: cranked-poc-dos
           path: dist/dos
@@ -303,7 +321,7 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: cranked-poc-web
           path: web-build
@@ -314,7 +332,7 @@ jobs:
           mkdir sdk && tar xzf sdk.tar.gz -C sdk --strip-components=1
       - name: The site (the web build, site.json, the freely licensed games in site/games.tsv, the SDK examples)
         run: scripts/make-site.sh --sdk-examples "$PWD/sdk" web-build public
-      - uses: actions/upload-artifact@v4 # the finished site, to serve elsewhere or try locally
+      - uses: actions/upload-artifact@v7 # the finished site, to serve elsewhere or try locally
         with:
           name: cranked-poc-site
           path: public
@@ -336,7 +354,7 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
       - name: Package

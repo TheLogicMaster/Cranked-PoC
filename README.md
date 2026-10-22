@@ -211,16 +211,22 @@ Flatpak or web build fails, nothing is released; the experimental ones (Android,
 left out when they fail.
 
 `scripts/package-release.sh` turns the builds into the release's files, and runs on artifacts downloaded by hand
-too:
+too. The main files are attached as they are; the rest are zipped, a zip for each platform:
 
 | File | What it is |
 | --- | --- |
-| `Cranked-PoC-x86_64.AppImage`, `Cranked-PoC-x86_64.flatpak` | The Linux desktop app, packaged |
-| `Cranked-PoC-linux-x86_64.zip`, `Cranked-PoC-windows-x64.zip` | The desktop app and the libretro cores, each with the JIT and as the interpreter build (`-nojit`) |
-| `Cranked-PoC-macOS.zip`, `Cranked-PoC-macOS-libretro.zip` | The macOS app, and the libretro cores |
+| `Cranked-PoC-x86_64.AppImage`, `Cranked-PoC-x86_64.flatpak` | The Linux desktop app |
+| `Cranked-PoC-windows-x64.exe` | The Windows desktop app (one executable) |
+| `Cranked-PoC-macOS.zip` | The macOS app (zipped, since an app is a folder) |
+| `Cranked-PoC.apk` | The Android app |
+| `Cranked-PoC-dos.zip` | The DOS build (`CRANKED.EXE`, the DPMI host, `CRANK.BAT`, `DOSBOX-X.CONF`, `README.TXT`) |
 | `Cranked-PoC-web.zip` | The web build, to host (see below) |
-| `Cranked-PoC.apk`, `Cranked-PoC-android-libretro.zip` | The Android app, and the libretro core for Android |
-| `Cranked-PoC-dos.zip` | The DOS build |
+| `Cranked-PoC-linux-x86_64-extras.zip`, `Cranked-PoC-windows-x64-extras.zip`, `Cranked-PoC-macOS-extras.zip` | The libretro cores (with the JIT and as the interpreter build), and the desktop app as the interpreter build (`desktop-nojit`; on Linux also as a plain executable) |
+| `Cranked-PoC-android-libretro.zip` | The libretro core for Android |
+
+A run's artifacts (on its page in Actions) are laid out the same way: the AppImage, the Windows app, the macOS app's
+zip and the APK are artifacts of their own, downloaded as they are, and each platform's other builds are in one
+zipped artifact.
 
 ## Hosting the web build
 
